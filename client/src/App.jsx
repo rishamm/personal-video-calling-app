@@ -22,9 +22,125 @@ function App() {
   const localStreamRef = useRef(null);
   const peerConnectionsRef = useRef({});
 
+  const closePeerConnection = (userId) => {
+    const pc = peerConnectionsRef.current[userId];
+    if (pc) {
+      pc.ontrack = null;
+      pc.onicecandidate = null;
+      pc.onconnectionstatechange = null;
+      pc.close();
+      delete peerConnectionsRef.current[userId];
+    }
+  };
+
+  const createPeerConnection = (userId) => {
+    if (peerConnectionsRef.current[userId]) {
+      return peerConnectionsRef.current[userId];
+    }
+
+    const peerConnection = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+    });
+
+    localStreamRef.current?.getTracks().forEach((track) => {
+      peerConnection.addTrack(track, localStreamRef.current);
+    });
+
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate && socketRef.current) {
+        socketRef.current.emit('ice-candidate', {
+          to: userId,
+          candidate: event.candidate,
+        });
+      }
+    };
+
+    peerConnection.ontrack = (event) => {
+      const [remoteStream] = event.streams;
+      if (remoteStream) {
+        setRemoteStreams((prev) => ({ ...prev, [userId]: remoteStream }));
+      }
+    };
+
+    peerConnection.onconnectionstatechange = () => {
+      if (
+        peerConnection.connectionState === 'failed' ||
+        peerConnection.connectionState === 'disconnected' ||
+        peerConnection.connectionState === 'closed'
+      ) {
+        closePeerConnection(userId);
+      }
+    };
+
+    peerConnectionsRef.current[userId] = peerConnection;
+    return peerConnection;
+  };
+
+  const connectToUser = async (userId) => {
+    if (!localStreamRef.current || !userId || !socketRef.current) return;
+
+    const peerConnection = createPeerConnection(userId);
+
+    if (peerConnection.signalingState !== 'stable') {
+      return;
+    }
+
+    try {
+      const offer = await peerConnection.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: true,
+      });
+      await peerConnection.setLocalDescription(offer);
+      socketRef.current.emit('offer', { to: userId, offer });
+    } catch (err) {
+      console.error('Failed to create offer:', err);
+    }
+  };
+
+  async function getLocalStream() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setError('This browser does not support camera and microphone access.');
+      return null;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'user',
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: true,
+      });
+
+      localStreamRef.current = stream;
+
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+
+      return stream;
+    } catch (err) {
+      console.error('Failed to access media devices:', err);
+      setError('Camera and microphone access was denied. Please allow access and retry.');
+      return null;
+    }
+  }
+
   useEffect(() => {
-    const socket = io(SOCKET_URL, { transports: ['websocket'] });
+    const socket = io(SOCKET_URL, {
+      transports: ['websocket'],
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      reconnectionAttempts: 5,
+    });
+
     socketRef.current = socket;
+
+    socket.on('connect', () => {
+      console.log('Connected to signaling server');
+    });
 
     socket.on('current-users', (users) => {
       setParticipants(users);
@@ -46,31 +162,41 @@ function App() {
         delete next[userId];
         return next;
       });
-
-      if (peerConnectionsRef.current[userId]) {
-        peerConnectionsRef.current[userId].close();
-        delete peerConnectionsRef.current[userId];
-      }
+      closePeerConnection(userId);
     });
 
     socket.on('offer', async ({ from, offer }) => {
       const peerConnection = createPeerConnection(from);
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-      const answer = await peerConnection.createAnswer();
-      await peerConnection.setLocalDescription(answer);
-      socket.emit('answer', { to: from, answer });
+      try {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+        socket.emit('answer', { to: from, answer });
+      } catch (err) {
+        console.error('Error handling offer:', err);
+      }
     });
 
     socket.on('answer', async ({ from, answer }) => {
       const peerConnection = peerConnectionsRef.current[from];
       if (!peerConnection) return;
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+
+      try {
+        await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+      } catch (err) {
+        console.error('Error handling answer:', err);
+      }
     });
 
     socket.on('ice-candidate', async ({ from, candidate }) => {
       const peerConnection = peerConnectionsRef.current[from];
       if (!peerConnection || !candidate) return;
-      await peerConnection.addIceCandidate(candidate);
+
+      try {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (err) {
+        console.error('Error adding ICE candidate:', err);
+      }
     });
 
     return () => {
@@ -78,71 +204,10 @@ function App() {
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((track) => track.stop());
       }
+      Object.values(peerConnectionsRef.current).forEach((pc) => pc.close());
+      peerConnectionsRef.current = {};
     };
   }, []);
-
-  async function getLocalStream() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: true,
-      });
-
-      localStreamRef.current = stream;
-
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
-
-      return stream;
-    } catch (err) {
-      console.error('Failed to access media devices:', err);
-      setError('Camera and microphone access is required to join the call.');
-      return null;
-    }
-  }
-
-  function createPeerConnection(userId) {
-    if (peerConnectionsRef.current[userId]) {
-      return peerConnectionsRef.current[userId];
-    }
-
-    const peerConnection = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
-    });
-
-    localStreamRef.current?.getTracks().forEach((track) => {
-      peerConnection.addTrack(track, localStreamRef.current);
-    });
-
-    peerConnection.onicecandidate = (event) => {
-      if (event.candidate) {
-        socketRef.current.emit('ice-candidate', {
-          to: userId,
-          candidate: event.candidate,
-        });
-      }
-    };
-
-    peerConnection.ontrack = (event) => {
-      const [remoteStream] = event.streams;
-      if (remoteStream) {
-        setRemoteStreams((prev) => ({ ...prev, [userId]: remoteStream }));
-      }
-    };
-
-    peerConnectionsRef.current[userId] = peerConnection;
-    return peerConnection;
-  }
-
-  async function connectToUser(userId) {
-    if (!localStreamRef.current || !userId) return;
-
-    const peerConnection = createPeerConnection(userId);
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
-    socketRef.current.emit('offer', { to: userId, offer });
-  }
 
   async function joinRoom() {
     if (!roomId.trim()) {
@@ -156,13 +221,16 @@ function App() {
     const trimmedName = name.trim() || 'Guest';
     setJoined(true);
     setError('');
-    socketRef.current.emit('join-room', roomId.trim(), trimmedName);
+    setIsMuted(false);
+    setIsCameraOff(false);
+    socketRef.current?.emit('join-room', roomId.trim(), trimmedName);
   }
 
   function leaveRoom() {
     setJoined(false);
     setParticipants([]);
     setRemoteStreams({});
+    setError('');
 
     Object.values(peerConnectionsRef.current).forEach((pc) => pc.close());
     peerConnectionsRef.current = {};
@@ -176,25 +244,25 @@ function App() {
       localVideoRef.current.srcObject = null;
     }
 
-    socketRef.current.emit('leave-room', roomId);
+    socketRef.current?.emit('leave-room', roomId);
   }
 
   function toggleMute() {
     if (!localStreamRef.current) return;
     const audioTrack = localStreamRef.current.getAudioTracks()[0];
-    if (audioTrack) {
-      audioTrack.enabled = !audioTrack.enabled;
-      setIsMuted(!audioTrack.enabled);
-    }
+    if (!audioTrack) return;
+
+    audioTrack.enabled = !audioTrack.enabled;
+    setIsMuted(!audioTrack.enabled);
   }
 
   function toggleCamera() {
     if (!localStreamRef.current) return;
     const videoTrack = localStreamRef.current.getVideoTracks()[0];
-    if (videoTrack) {
-      videoTrack.enabled = !videoTrack.enabled;
-      setIsCameraOff(!videoTrack.enabled);
-    }
+    if (!videoTrack) return;
+
+    videoTrack.enabled = !videoTrack.enabled;
+    setIsCameraOff(!videoTrack.enabled);
   }
 
   async function copyRoomLink() {
@@ -203,8 +271,8 @@ function App() {
       await navigator.clipboard.writeText(shareUrl);
       alert('Room link copied to clipboard.');
     } catch (error) {
-      console.error('Failed to copy URL:', error);
-      alert('Copy failed. Please copy the room ID manually.');
+      console.error('Failed to copy room URL:', error);
+      alert(`Copy failed. Share this room ID: ${roomId}`);
     }
   }
 
