@@ -63,6 +63,7 @@ function App() {
     pc.onicecandidate = null;
     pc.onconnectionstatechange = null;
     pc.close();
+
     delete peerConnectionsRef.current[userId];
     delete negotiationLockRef.current[userId];
     delete pendingRemoteOffersRef.current[userId];
@@ -113,34 +114,32 @@ function App() {
   };
 
   const flushPendingOffer = async (userId) => {
-    const pendingOffer = pendingRemoteOffersRef.current[userId];
-    if (!pendingOffer) return;
+    const offer = pendingRemoteOffersRef.current[userId];
+    if (!offer) return;
 
     delete pendingRemoteOffersRef.current[userId];
     const peerConnection = createPeerConnection(userId);
 
-    try {
-      if (peerConnection.signalingState !== 'stable') {
-        pendingRemoteOffersRef.current[userId] = pendingOffer;
-        return;
-      }
+    if (peerConnection.signalingState !== 'stable') {
+      pendingRemoteOffersRef.current[userId] = offer;
+      return;
+    }
 
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(pendingOffer));
+    try {
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
       socketRef.current.emit('answer', { to: userId, answer });
     } catch (err) {
-      console.error('Failed to flush pending remote offer:', err);
+      console.error('Failed to flush pending offer:', err);
     }
   };
 
   const connectToUser = async (userId) => {
     if (!localStreamRef.current || !userId || !socketRef.current) return;
-    if (negotiationLockRef.current[userId]) return;
 
     const peerConnection = createPeerConnection(userId);
-
-    if (peerConnection.signalingState !== 'stable') {
+    if (negotiationLockRef.current[userId] || peerConnection.signalingState !== 'stable') {
       return;
     }
 
@@ -151,6 +150,7 @@ function App() {
         offerToReceiveAudio: true,
         offerToReceiveVideo: true,
       });
+
       await peerConnection.setLocalDescription(offer);
       socketRef.current.emit('offer', { to: userId, offer });
     } catch (err) {
