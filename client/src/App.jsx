@@ -39,6 +39,8 @@ function App() {
   const localVideoRef = useRef(null);
   const localStreamRef = useRef(null);
   const peerConnectionsRef = useRef({});
+  const negotiationLockRef = useRef({});
+  const pendingRemoteOffersRef = useRef({});
 
   const attachLocalPreview = (stream) => {
     if (!localVideoRef.current || !stream) return;
@@ -62,6 +64,8 @@ function App() {
     pc.onconnectionstatechange = null;
     pc.close();
     delete peerConnectionsRef.current[userId];
+    delete negotiationLockRef.current[userId];
+    delete pendingRemoteOffersRef.current[userId];
   };
 
   const createPeerConnection = (userId) => {
@@ -108,14 +112,39 @@ function App() {
     return peerConnection;
   };
 
+  const flushPendingOffer = async (userId) => {
+    const pendingOffer = pendingRemoteOffersRef.current[userId];
+    if (!pendingOffer) return;
+
+    delete pendingRemoteOffersRef.current[userId];
+    const peerConnection = createPeerConnection(userId);
+
+    try {
+      if (peerConnection.signalingState !== 'stable') {
+        pendingRemoteOffersRef.current[userId] = pendingOffer;
+        return;
+      }
+
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(pendingOffer));
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+      socketRef.current.emit('answer', { to: userId, answer });
+    } catch (err) {
+      console.error('Failed to flush pending remote offer:', err);
+    }
+  };
+
   const connectToUser = async (userId) => {
     if (!localStreamRef.current || !userId || !socketRef.current) return;
+    if (negotiationLockRef.current[userId]) return;
 
     const peerConnection = createPeerConnection(userId);
 
     if (peerConnection.signalingState !== 'stable') {
       return;
     }
+
+    negotiationLockRef.current[userId] = true;
 
     try {
       const offer = await peerConnection.createOffer({
@@ -126,6 +155,7 @@ function App() {
       socketRef.current.emit('offer', { to: userId, offer });
     } catch (err) {
       console.error('Failed to create offer:', err);
+      delete negotiationLockRef.current[userId];
     }
   };
 
@@ -147,7 +177,6 @@ function App() {
 
       localStreamRef.current = stream;
       attachLocalPreview(stream);
-
       return stream;
     } catch (err) {
       console.error('Media access failed:', err);
@@ -196,6 +225,12 @@ function App() {
 
     socket.on('offer', async ({ from, offer }) => {
       const peerConnection = createPeerConnection(from);
+
+      if (peerConnection.signalingState !== 'stable') {
+        pendingRemoteOffersRef.current[from] = offer;
+        return;
+      }
+
       try {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
         const answer = await peerConnection.createAnswer();
@@ -210,8 +245,14 @@ function App() {
       const peerConnection = peerConnectionsRef.current[from];
       if (!peerConnection) return;
 
+      if (peerConnection.signalingState !== 'have-local-offer') {
+        return;
+      }
+
       try {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+        delete negotiationLockRef.current[from];
+        await flushPendingOffer(from);
       } catch (err) {
         console.error('Error handling answer:', err);
       }
@@ -235,6 +276,8 @@ function App() {
       }
       Object.values(peerConnectionsRef.current).forEach((pc) => pc.close());
       peerConnectionsRef.current = {};
+      negotiationLockRef.current = {};
+      pendingRemoteOffersRef.current = {};
     };
   }, []);
 
@@ -269,6 +312,8 @@ function App() {
 
     Object.values(peerConnectionsRef.current).forEach((pc) => pc.close());
     peerConnectionsRef.current = {};
+    negotiationLockRef.current = {};
+    pendingRemoteOffersRef.current = {};
 
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
