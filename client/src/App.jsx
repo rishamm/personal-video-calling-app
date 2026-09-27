@@ -126,7 +126,7 @@ function App() {
       try {
         await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (err) {
-        console.error('Failed to add queued ICE candidate:', err);
+        console.warn('Failed to add queued ICE candidate:', err);
       }
     }
   };
@@ -301,10 +301,7 @@ function App() {
         return;
       }
 
-      if (
-        peerConnection.remoteDescription === null ||
-        peerConnection.remoteDescription === undefined
-      ) {
+      if (!peerConnection.remoteDescription) {
         if (!pendingIceCandidatesRef.current[from]) {
           pendingIceCandidatesRef.current[from] = [];
         }
@@ -315,7 +312,7 @@ function App() {
       try {
         await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (err) {
-        console.error('Error adding ICE candidate:', err);
+        console.warn('Failed to add ICE candidate:', err);
       }
     });
 
