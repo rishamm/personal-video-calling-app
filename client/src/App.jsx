@@ -41,6 +41,7 @@ function App() {
   const peerConnectionsRef = useRef({});
   const negotiationLockRef = useRef({});
   const pendingRemoteOffersRef = useRef({});
+  const pendingIceCandidatesRef = useRef({});
 
   const attachLocalPreview = (stream) => {
     if (!localVideoRef.current || !stream) return;
@@ -67,6 +68,7 @@ function App() {
     delete peerConnectionsRef.current[userId];
     delete negotiationLockRef.current[userId];
     delete pendingRemoteOffersRef.current[userId];
+    delete pendingIceCandidatesRef.current[userId];
   };
 
   const createPeerConnection = (userId) => {
@@ -85,10 +87,7 @@ function App() {
 
     peerConnection.onicecandidate = (event) => {
       if (event.candidate && socketRef.current) {
-        socketRef.current.emit('ice-candidate', {
-          to: userId,
-          candidate: event.candidate,
-        });
+        socketRef.current.emit('ice-candidate', { to: userId, candidate: event.candidate });
       }
     };
 
@@ -113,23 +112,44 @@ function App() {
     return peerConnection;
   };
 
+  const flushPendingIceCandidates = async (userId) => {
+    const candidates = pendingIceCandidatesRef.current[userId] || [];
+    if (candidates.length === 0) return;
+
+    const peerConnection = peerConnectionsRef.current[userId];
+    if (!peerConnection) return;
+
+    const pending = [...candidates];
+    delete pendingIceCandidatesRef.current[userId];
+
+    for (const candidate of pending) {
+      try {
+        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (err) {
+        console.error('Failed to add queued ICE candidate:', err);
+      }
+    }
+  };
+
   const flushPendingOffer = async (userId) => {
-    const offer = pendingRemoteOffersRef.current[userId];
-    if (!offer) return;
+    const pendingOffer = pendingRemoteOffersRef.current[userId];
+    if (!pendingOffer) return;
 
     delete pendingRemoteOffersRef.current[userId];
+
     const peerConnection = createPeerConnection(userId);
 
     if (peerConnection.signalingState !== 'stable') {
-      pendingRemoteOffersRef.current[userId] = offer;
+      pendingRemoteOffersRef.current[userId] = pendingOffer;
       return;
     }
 
     try {
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+      await peerConnection.setRemoteDescription(new RTCSessionDescription(pendingOffer));
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
       socketRef.current.emit('answer', { to: userId, answer });
+      await flushPendingIceCandidates(userId);
     } catch (err) {
       console.error('Failed to flush pending offer:', err);
     }
@@ -139,9 +159,9 @@ function App() {
     if (!localStreamRef.current || !userId || !socketRef.current) return;
 
     const peerConnection = createPeerConnection(userId);
-    if (negotiationLockRef.current[userId] || peerConnection.signalingState !== 'stable') {
-      return;
-    }
+
+    if (negotiationLockRef.current[userId]) return;
+    if (peerConnection.signalingState !== 'stable') return;
 
     negotiationLockRef.current[userId] = true;
 
@@ -153,6 +173,7 @@ function App() {
 
       await peerConnection.setLocalDescription(offer);
       socketRef.current.emit('offer', { to: userId, offer });
+      await flushPendingIceCandidates(userId);
     } catch (err) {
       console.error('Failed to create offer:', err);
       delete negotiationLockRef.current[userId];
@@ -202,7 +223,12 @@ function App() {
 
     socket.on('current-users', (users) => {
       setParticipants(users);
-      users.forEach((user) => connectToUser(user.id));
+
+      users.forEach((user) => {
+        if (user.id !== socket.id) {
+          connectToUser(user.id);
+        }
+      });
     });
 
     socket.on('user-joined', (user) => {
@@ -210,7 +236,10 @@ function App() {
         const exists = prev.some((participant) => participant.id === user.id);
         return exists ? prev : [...prev, user];
       });
-      connectToUser(user.id);
+
+      if (user.id !== socket.id) {
+        connectToUser(user.id);
+      }
     });
 
     socket.on('user-left', (userId) => {
@@ -220,6 +249,7 @@ function App() {
         delete next[userId];
         return next;
       });
+
       closePeerConnection(userId);
     });
 
@@ -236,6 +266,7 @@ function App() {
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
         socket.emit('answer', { to: from, answer });
+        await flushPendingIceCandidates(from);
       } catch (err) {
         console.error('Error handling offer:', err);
       }
@@ -252,6 +283,7 @@ function App() {
       try {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
         delete negotiationLockRef.current[from];
+        await flushPendingIceCandidates(from);
         await flushPendingOffer(from);
       } catch (err) {
         console.error('Error handling answer:', err);
@@ -260,7 +292,25 @@ function App() {
 
     socket.on('ice-candidate', async ({ from, candidate }) => {
       const peerConnection = peerConnectionsRef.current[from];
-      if (!peerConnection || !candidate) return;
+
+      if (!peerConnection) {
+        if (!pendingIceCandidatesRef.current[from]) {
+          pendingIceCandidatesRef.current[from] = [];
+        }
+        pendingIceCandidatesRef.current[from].push(candidate);
+        return;
+      }
+
+      if (
+        peerConnection.remoteDescription === null ||
+        peerConnection.remoteDescription === undefined
+      ) {
+        if (!pendingIceCandidatesRef.current[from]) {
+          pendingIceCandidatesRef.current[from] = [];
+        }
+        pendingIceCandidatesRef.current[from].push(candidate);
+        return;
+      }
 
       try {
         await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
@@ -271,13 +321,16 @@ function App() {
 
     return () => {
       socket.disconnect();
+
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((track) => track.stop());
       }
+
       Object.values(peerConnectionsRef.current).forEach((pc) => pc.close());
       peerConnectionsRef.current = {};
       negotiationLockRef.current = {};
       pendingRemoteOffersRef.current = {};
+      pendingIceCandidatesRef.current = {};
     };
   }, []);
 
@@ -297,10 +350,12 @@ function App() {
     if (!stream) return;
 
     const trimmedName = name.trim() || 'Guest';
+
     setJoined(true);
     setError('');
     setIsMuted(false);
     setIsCameraOff(false);
+
     socketRef.current?.emit('join-room', roomId.trim(), trimmedName);
   }
 
@@ -314,6 +369,7 @@ function App() {
     peerConnectionsRef.current = {};
     negotiationLockRef.current = {};
     pendingRemoteOffersRef.current = {};
+    pendingIceCandidatesRef.current = {};
 
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach((track) => track.stop());
@@ -347,11 +403,12 @@ function App() {
 
   async function copyRoomLink() {
     const shareUrl = `${window.location.origin}?room=${encodeURIComponent(roomId)}`;
+
     try {
       await navigator.clipboard.writeText(shareUrl);
       alert('Room link copied to clipboard.');
-    } catch (error) {
-      console.error('Failed to copy room URL:', error);
+    } catch (err) {
+      console.error('Failed to copy room URL:', err);
       alert(`Copy failed. Share this room ID: ${roomId}`);
     }
   }
@@ -359,6 +416,7 @@ function App() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomFromUrl = params.get('room');
+
     if (roomFromUrl) {
       setRoomId(roomFromUrl);
     }
