@@ -40,6 +40,19 @@ function App() {
   const localStreamRef = useRef(null);
   const peerConnectionsRef = useRef({});
 
+  const attachLocalPreview = (stream) => {
+    if (!localVideoRef.current || !stream) return;
+
+    localVideoRef.current.srcObject = stream;
+    localVideoRef.current.muted = true;
+    localVideoRef.current.playsInline = true;
+    localVideoRef.current.autoplay = true;
+
+    localVideoRef.current.play().catch((err) => {
+      console.warn('Autoplay for local preview was blocked:', err);
+    });
+  };
+
   const closePeerConnection = (userId) => {
     const pc = peerConnectionsRef.current[userId];
     if (!pc) return;
@@ -133,10 +146,7 @@ function App() {
       });
 
       localStreamRef.current = stream;
-
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
+      attachLocalPreview(stream);
 
       return stream;
     } catch (err) {
@@ -227,6 +237,12 @@ function App() {
       peerConnectionsRef.current = {};
     };
   }, []);
+
+  useEffect(() => {
+    if (localStreamRef.current && localVideoRef.current) {
+      attachLocalPreview(localStreamRef.current);
+    }
+  }, [joined]);
 
   async function joinRoom() {
     if (!roomId.trim()) {
