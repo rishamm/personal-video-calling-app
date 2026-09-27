@@ -7,6 +7,24 @@ function generateRoomId() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
 
+const TURN_SERVER = import.meta.env.VITE_TURN_SERVER || null;
+const TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME || '';
+const TURN_PASSWORD = import.meta.env.VITE_TURN_PASSWORD || '';
+
+function getIceServers() {
+  const servers = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+  if (TURN_SERVER && TURN_USERNAME && TURN_PASSWORD) {
+    servers.push({
+      urls: TURN_SERVER,
+      username: TURN_USERNAME,
+      credential: TURN_PASSWORD,
+    });
+  }
+
+  return servers;
+}
+
 function App() {
   const [name, setName] = useState('Guest');
   const [roomId, setRoomId] = useState(generateRoomId());
@@ -24,13 +42,13 @@ function App() {
 
   const closePeerConnection = (userId) => {
     const pc = peerConnectionsRef.current[userId];
-    if (pc) {
-      pc.ontrack = null;
-      pc.onicecandidate = null;
-      pc.onconnectionstatechange = null;
-      pc.close();
-      delete peerConnectionsRef.current[userId];
-    }
+    if (!pc) return;
+
+    pc.ontrack = null;
+    pc.onicecandidate = null;
+    pc.onconnectionstatechange = null;
+    pc.close();
+    delete peerConnectionsRef.current[userId];
   };
 
   const createPeerConnection = (userId) => {
@@ -39,7 +57,8 @@ function App() {
     }
 
     const peerConnection = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      iceServers: getIceServers(),
+      iceCandidatePoolSize: 10,
     });
 
     localStreamRef.current?.getTracks().forEach((track) => {
@@ -121,8 +140,8 @@ function App() {
 
       return stream;
     } catch (err) {
-      console.error('Failed to access media devices:', err);
-      setError('Camera and microphone access was denied. Please allow access and retry.');
+      console.error('Media access failed:', err);
+      setError('Camera and microphone access was denied. Please allow them and retry.');
       return null;
     }
   }
