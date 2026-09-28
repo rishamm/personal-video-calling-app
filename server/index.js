@@ -37,13 +37,9 @@ io.on('connection', (socket) => {
     room.set(socket.id, { id: socket.id, name: displayName });
     socket.join(roomId);
 
-    // The new participant receives the existing participants and is the
-    // only side that creates offers. This prevents simultaneous offers and
-    // the resulting setRemoteDescription InvalidStateError.
-    const existingParticipants = Array.from(room.values()).filter(
-      (user) => user.id !== socket.id,
-    );
-    socket.emit('current-users', existingParticipants);
+    const participants = Array.from(room.values());
+    socket.emit('current-users', participants.filter((user) => user.id !== socket.id));
+    socket.to(roomId).emit('user-joined', { id: socket.id, name: displayName });
   });
 
   socket.on('leave-room', (roomId) => {
@@ -61,22 +57,33 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('close-room', (roomId) => {
+    if (!roomId) return;
+
+    const room = rooms.get(roomId);
+    if (!room) return;
+
+    // Notify all participants that the room is closing
+    io.to(roomId).emit('room-closed');
+
+    // Clear all users from the room
+    room.clear();
+    socket.leave(roomId);
+    rooms.delete(roomId);
+
+    console.log(`Room ${roomId} closed by ${socket.id}`);
+  });
+
   socket.on('offer', ({ to, offer }) => {
-    if (to && offer) {
-      socket.to(to).emit('offer', { from: socket.id, offer });
-    }
+    socket.to(to).emit('offer', { from: socket.id, offer });
   });
 
   socket.on('answer', ({ to, answer }) => {
-    if (to && answer) {
-      socket.to(to).emit('answer', { from: socket.id, answer });
-    }
+    socket.to(to).emit('answer', { from: socket.id, answer });
   });
 
   socket.on('ice-candidate', ({ to, candidate }) => {
-    if (to && candidate) {
-      socket.to(to).emit('ice-candidate', { from: socket.id, candidate });
-    }
+    socket.to(to).emit('ice-candidate', { from: socket.id, candidate });
   });
 
   socket.on('disconnect', () => {
