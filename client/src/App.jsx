@@ -39,7 +39,8 @@ const LocalVideo = ({ stream, name }) => {
 
 function App() {
   const [name, setName] = useState('Guest');
-  const [roomId, setRoomId] = useState(generateRoomId());
+  // Changed from generateRoomId() to '' so it stays blank initially
+  const [roomId, setRoomId] = useState('');
   const [joined, setJoined] = useState(false);
   const [error, setError] = useState('');
   const [participants, setParticipants] = useState([]);
@@ -48,7 +49,7 @@ function App() {
   const [isCameraOff, setIsCameraOff] = useState(false);
   const [activeLocalStream, setActiveLocalStream] = useState(null);
 
-  // 🟢 NEW: Tracks which video is Full Screen
+  // Tracks which video is Full Screen
   const [mainStreamId, setMainStreamId] = useState('local');
 
   const socketRef = useRef(null);
@@ -67,7 +68,7 @@ function App() {
     }
   }, []);
 
-  // 🟢 NEW: Auto-switch Full Screen to the remote user when they join
+  // Auto-switch Full Screen to the remote user when they join
   useEffect(() => {
     const remoteIds = Object.keys(remoteStreams);
     if (remoteIds.length > 0 && mainStreamId === 'local') {
@@ -96,14 +97,14 @@ function App() {
       parameters.encodings[0].maxFramerate = 15;
 
       await videoSender.setParameters(parameters);
-    } catch (err) {}
+    } catch (err) { }
   };
 
   useEffect(() => {
     const handleVisibilityChange = async () => {
       if (document.visibilityState === 'visible' && joined) {
         const videoTrack = localStreamRef.current?.getVideoTracks()[0];
-        
+
         if (!videoTrack || videoTrack.readyState === 'ended') {
           try {
             const newStream = await getLocalStream();
@@ -120,7 +121,7 @@ function App() {
                 await audioSender.replaceTrack(newStream.getAudioTracks()[0]);
               }
             });
-          } catch (err) {}
+          } catch (err) { }
         }
       }
     };
@@ -145,13 +146,13 @@ function App() {
   const createPeerConnection = (userId) => {
     if (peerConnectionsRef.current[userId]) return peerConnectionsRef.current[userId];
 
-    const configuration = { 
+    const configuration = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
       ],
       iceCandidatePoolSize: 2
     };
-    
+
     const peerConnection = new RTCPeerConnection(configuration);
 
     if (localStreamRef.current) {
@@ -189,13 +190,13 @@ function App() {
     if (candidates.length === 0) return;
     const peerConnection = peerConnectionsRef.current[userId];
     if (!peerConnection) return;
-    
+
     const pending = [...candidates];
     delete pendingIceCandidatesRef.current[userId];
 
     for (const candidate of pending) {
-      try { await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); } 
-      catch (err) {}
+      try { await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); }
+      catch (err) { }
     }
   };
 
@@ -203,13 +204,13 @@ function App() {
     const pendingOffer = pendingRemoteOffersRef.current[userId];
     if (!pendingOffer) return;
     delete pendingRemoteOffersRef.current[userId];
-    
+
     const peerConnection = createPeerConnection(userId);
     if (peerConnection.signalingState !== 'stable') {
       pendingRemoteOffersRef.current[userId] = pendingOffer;
       return;
     }
-    
+
     try {
       await peerConnection.setRemoteDescription(new RTCSessionDescription(pendingOffer));
       const answer = await peerConnection.createAnswer();
@@ -217,7 +218,7 @@ function App() {
       socketRef.current.emit('answer', { to: userId, answer });
       await flushPendingIceCandidates(userId);
       await applyLowBandwidthConstraints(peerConnection);
-    } catch (err) {}
+    } catch (err) { }
   };
 
   const connectToUser = async (userId) => {
@@ -268,7 +269,7 @@ function App() {
   }
 
   useEffect(() => {
-    const socket = io(SOCKET_URL, { 
+    const socket = io(SOCKET_URL, {
       transports: ['websocket'],
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
@@ -313,7 +314,7 @@ function App() {
         socket.emit('answer', { to: from, answer });
         await flushPendingIceCandidates(from);
         await applyLowBandwidthConstraints(peerConnection);
-      } catch (err) {}
+      } catch (err) { }
     });
 
     socket.on('answer', async ({ from, answer }) => {
@@ -325,7 +326,7 @@ function App() {
         await flushPendingIceCandidates(from);
         await flushPendingOffer(from);
         await applyLowBandwidthConstraints(peerConnection);
-      } catch (err) {}
+      } catch (err) { }
     });
 
     socket.on('ice-candidate', async ({ from, candidate }) => {
@@ -335,8 +336,8 @@ function App() {
         pendingIceCandidatesRef.current[from].push(candidate);
         return;
       }
-      try { await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); } 
-      catch (err) {}
+      try { await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); }
+      catch (err) { }
     });
 
     return () => {
@@ -347,7 +348,7 @@ function App() {
   }, [joined, roomId, name]);
 
   async function joinRoom() {
-    if (!roomId.trim()) return setError('Room name is required.');
+    if (!roomId.trim()) return setError('Room ID is required.');
     const stream = await getLocalStream();
     if (!stream) return;
 
@@ -386,7 +387,7 @@ function App() {
     }
   };
 
-  // 🟢 MAP ALL STREAMS FOR SWITCHING LOGIC
+  // MAP ALL STREAMS FOR SWITCHING LOGIC
   const allStreams = [
     { id: 'local', stream: activeLocalStream, isLocal: true, name: name || 'You' },
     ...Object.entries(remoteStreams).map(([id, stream]) => ({
@@ -419,7 +420,7 @@ function App() {
               <button onClick={joinRoom}>Join room</button>
               <button className="secondary" onClick={() => setRoomId(generateRoomId())}>Generate room</button>
             </div>
-            {error && <p className="error" style={{color: 'red', fontWeight: 'bold'}}>{error}</p>}
+            {error && <p className="error" style={{ color: 'red', fontWeight: 'bold' }}>{error}</p>}
           </div>
         </div>
       ) : (
@@ -440,9 +441,9 @@ function App() {
             </div>
           </header>
 
-          {/* 🟢 Main + PiP Display using your existing components */}
+          {/* Main + PiP Display */}
           <div style={{ position: 'relative', flex: 1, width: '100%', height: '100%', minHeight: '600px', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-            
+
             {/* Main Full-Screen Video */}
             <div style={{ width: '100%', height: '100%', position: 'absolute', inset: 0 }}>
               {mainStreamData?.isLocal ? (
@@ -458,12 +459,12 @@ function App() {
                 <div
                   key={s.id}
                   onClick={() => setMainStreamId(s.id)}
-                  style={{ 
-                    width: '140px', 
-                    cursor: 'pointer', 
-                    borderRadius: '8px', 
-                    overflow: 'hidden', 
-                    boxShadow: '0 8px 16px rgba(0,0,0,0.6)', 
+                  style={{
+                    width: '140px',
+                    cursor: 'pointer',
+                    borderRadius: '8px',
+                    overflow: 'hidden',
+                    boxShadow: '0 8px 16px rgba(0,0,0,0.6)',
                     border: '2px solid rgba(255,255,255,0.7)',
                     transition: 'transform 0.2s ease-in-out'
                   }}
