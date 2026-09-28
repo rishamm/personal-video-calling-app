@@ -70,9 +70,9 @@ function App() {
   useEffect(() => {
     const remoteIds = Object.keys(remoteStreams);
     if (remoteIds.length > 0 && mainStreamId === 'local') {
-      setMainStreamId(remoteIds[0]); // Make them full screen
+      setMainStreamId(remoteIds[0]);
     } else if (remoteIds.length === 0 && mainStreamId !== 'local') {
-      setMainStreamId('local'); // Revert to self if they leave
+      setMainStreamId('local');
     } else if (mainStreamId !== 'local' && !remoteStreams[mainStreamId]) {
       setMainStreamId(remoteIds.length > 0 ? remoteIds[0] : 'local');
     }
@@ -89,11 +89,9 @@ function App() {
       if (!parameters.encodings || parameters.encodings.length === 0) {
         parameters.encodings = [{}];
       }
-
       parameters.encodings[0].maxBitrate = 200000;
       parameters.encodings[0].scaleResolutionDownBy = 1.5;
       parameters.encodings[0].maxFramerate = 15;
-
       await videoSender.setParameters(parameters);
     } catch (err) { }
   };
@@ -139,6 +137,13 @@ function App() {
     delete negotiationLockRef.current[userId];
     delete pendingRemoteOffersRef.current[userId];
     delete pendingIceCandidatesRef.current[userId];
+
+    // Clear video immediately to prevent frozen frame if disconnected
+    setRemoteStreams((prev) => {
+      const next = { ...prev };
+      delete next[userId];
+      return next;
+    });
   };
 
   const createPeerConnection = (userId) => {
@@ -147,6 +152,7 @@ function App() {
     const configuration = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:global.stun.twilio.com:3478' } // Secondary fallback to ensure connectivity
       ],
       iceCandidatePoolSize: 2
     };
@@ -174,8 +180,17 @@ function App() {
     };
 
     peerConnection.onconnectionstatechange = () => {
-      if (peerConnection.connectionState === 'failed' || peerConnection.connectionState === 'closed') {
+      const state = peerConnection.connectionState;
+      if (state === 'failed' || state === 'disconnected' || state === 'closed') {
         closePeerConnection(userId);
+        // Robust reconnect mechanism: Try to rebuild connection if we dropped
+        setParticipants(prev => {
+          const stillInRoom = prev.some(p => p.id === userId);
+          if (stillInRoom && socketRef.current?.id < userId) {
+            setTimeout(() => connectToUser(userId), 2000);
+          }
+          return prev;
+        });
       }
     };
 
@@ -221,6 +236,7 @@ function App() {
 
   const connectToUser = async (userId) => {
     if (!localStreamRef.current || !userId || !socketRef.current) return;
+
     const peerConnection = createPeerConnection(userId);
 
     if (negotiationLockRef.current[userId] || peerConnection.signalingState !== 'stable') return;
@@ -233,7 +249,14 @@ function App() {
       await flushPendingIceCandidates(userId);
       await applyLowBandwidthConstraints(peerConnection);
     } catch (err) {
-      delete negotiationLockRef.current[userId];
+      // Allow retry if failed
+    } finally {
+      // Clear lock after a timeout just in case it deadlocks
+      setTimeout(() => {
+        if (negotiationLockRef.current) {
+          delete negotiationLockRef.current[userId];
+        }
+      }, 5000);
     }
   };
 
@@ -282,20 +305,22 @@ function App() {
 
     socket.on('current-users', (users) => {
       setParticipants(users);
-      users.forEach((user) => connectToUser(user.id));
+      const myId = socket.id;
+      // Guaranteed to only trigger one side to initiate the offer preventing glares
+      users.forEach((user) => {
+        if (myId < user.id) connectToUser(user.id);
+      });
     });
 
     socket.on('user-joined', (user) => {
       setParticipants((prev) => (prev.some((p) => p.id === user.id) ? prev : [...prev, user]));
+      const myId = socket.id;
+      // Guaranteed to only trigger one side to initiate the offer preventing glares
+      if (myId < user.id) connectToUser(user.id);
     });
 
     socket.on('user-left', (userId) => {
       setParticipants((prev) => prev.filter((p) => p.id !== userId));
-      setRemoteStreams((prev) => {
-        const next = { ...prev };
-        delete next[userId];
-        return next;
-      });
       closePeerConnection(userId);
     });
 
@@ -345,7 +370,6 @@ function App() {
     };
   }, [joined, roomId, name]);
 
-  // Modified to take an explicit ID (useful for the auto-generate flow)
   async function joinRoom(idToJoin = roomId) {
     if (!idToJoin.trim()) return setError('Room ID is required.');
     const stream = await getLocalStream();
@@ -356,7 +380,6 @@ function App() {
     socketRef.current?.emit('join-room', idToJoin.trim(), name.trim() || 'Guest');
   }
 
-  // New function to generate the ID and immediately join
   const handleCreateAndJoin = async () => {
     const newRoomId = generateRoomId();
     setRoomId(newRoomId);
