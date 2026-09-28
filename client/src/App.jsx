@@ -39,7 +39,6 @@ const LocalVideo = ({ stream, name }) => {
 
 function App() {
   const [name, setName] = useState('Guest');
-  // Changed from generateRoomId() to '' so it stays blank initially
   const [roomId, setRoomId] = useState('');
   const [joined, setJoined] = useState(false);
   const [error, setError] = useState('');
@@ -49,7 +48,6 @@ function App() {
   const [isCameraOff, setIsCameraOff] = useState(false);
   const [activeLocalStream, setActiveLocalStream] = useState(null);
 
-  // Tracks which video is Full Screen
   const [mainStreamId, setMainStreamId] = useState('local');
 
   const socketRef = useRef(null);
@@ -347,15 +345,23 @@ function App() {
     };
   }, [joined, roomId, name]);
 
-  async function joinRoom() {
-    if (!roomId.trim()) return setError('Room ID is required.');
+  // Modified to take an explicit ID (useful for the auto-generate flow)
+  async function joinRoom(idToJoin = roomId) {
+    if (!idToJoin.trim()) return setError('Room ID is required.');
     const stream = await getLocalStream();
     if (!stream) return;
 
     setJoined(true);
     setError('');
-    socketRef.current?.emit('join-room', roomId.trim(), name.trim() || 'Guest');
+    socketRef.current?.emit('join-room', idToJoin.trim(), name.trim() || 'Guest');
   }
+
+  // New function to generate the ID and immediately join
+  const handleCreateAndJoin = async () => {
+    const newRoomId = generateRoomId();
+    setRoomId(newRoomId);
+    await joinRoom(newRoomId);
+  };
 
   const toggleMute = () => {
     if (localStreamRef.current) {
@@ -413,12 +419,12 @@ function App() {
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Guest" />
             </label>
             <label>
-              Room ID
-              <input value={roomId} onChange={(e) => setRoomId(e.target.value)} placeholder="Example: FAMILY123" />
+              Room ID (Optional)
+              <input value={roomId} onChange={(e) => setRoomId(e.target.value)} placeholder="Enter code to join existing" />
             </label>
             <div className="join-actions">
-              <button onClick={joinRoom}>Join room</button>
-              <button className="secondary" onClick={() => setRoomId(generateRoomId())}>Generate room</button>
+              <button onClick={() => joinRoom(roomId)}>Join room</button>
+              <button className="secondary" onClick={handleCreateAndJoin}>Create & Join</button>
             </div>
             {error && <p className="error" style={{ color: 'red', fontWeight: 'bold' }}>{error}</p>}
           </div>
@@ -452,6 +458,44 @@ function App() {
                 <RemoteVideo stream={mainStreamData?.stream} name={mainStreamData?.name} />
               )}
             </div>
+
+            {/* Google Meet Style "Waiting for others" popup */}
+            {participants.length === 0 && (
+              <div style={{
+                position: 'absolute',
+                bottom: '30px',
+                left: '30px',
+                backgroundColor: 'rgba(30, 30, 30, 0.9)',
+                padding: '20px',
+                borderRadius: '12px',
+                zIndex: 20,
+                color: 'white',
+                maxWidth: '320px',
+                boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+                border: '1px solid rgba(255,255,255,0.1)'
+              }}>
+                <h3 style={{ marginTop: 0, marginBottom: '8px', fontSize: '18px', fontWeight: '500' }}>Your meeting's ready</h3>
+                <p style={{ margin: 0, marginBottom: '16px', fontSize: '14px', color: '#ccc', lineHeight: '1.4' }}>
+                  Share this meeting link with others you want in the meeting.
+                </p>
+                <button
+                  onClick={copyRoomLink}
+                  style={{
+                    width: '100%',
+                    padding: '10px 16px',
+                    backgroundColor: '#1a73e8',
+                    border: 'none',
+                    borderRadius: '4px',
+                    color: 'white',
+                    cursor: 'pointer',
+                    fontWeight: 'bold',
+                    fontSize: '14px'
+                  }}
+                >
+                  Copy joining info
+                </button>
+              </div>
+            )}
 
             {/* Floating PiP Videos (Click to Swap) */}
             <div style={{ position: 'absolute', bottom: '20px', right: '20px', display: 'flex', flexDirection: 'column', gap: '15px', zIndex: 10 }}>
