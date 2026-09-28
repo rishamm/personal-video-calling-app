@@ -18,7 +18,6 @@ const RemoteVideo = ({ stream, name }) => {
   }, [stream]);
   return (
     <div className="video-card remote" style={{ width: '100%', height: '100%', position: 'relative', backgroundColor: '#111' }}>
-      {/* Removed scaleX(-1) so remote users aren't mirrored backward */}
       <video ref={videoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
       <div className="video-tag" style={{ position: 'absolute', bottom: '10px', left: '10px', background: 'rgba(0,0,0,0.6)', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '14px' }}>
         {name || 'Guest'}
@@ -65,16 +64,6 @@ function App() {
   const negotiationLockRef = useRef({});
   const pendingRemoteOffersRef = useRef({});
   const pendingIceCandidatesRef = useRef({});
-
-  // 🚀 SILENT CAMERA WARM-UP: Starts allocating camera hardware the moment the page loads
-  useEffect(() => {
-    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-      .then(stream => {
-        localStreamRef.current = stream;
-        setActiveLocalStream(stream);
-      })
-      .catch(() => { /* Ignore errors here, will show them properly when user clicks Join */ });
-  }, []);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -358,11 +347,7 @@ function App() {
 
     setIsJoining(true);
 
-    // Will be completely instantaneous if background warmup completed
-    let stream = activeLocalStream || localStreamRef.current;
-    if (!stream) {
-      stream = await getLocalStream();
-    }
+    const stream = await getLocalStream();
 
     if (!stream) {
       setIsJoining(false);
