@@ -12,7 +12,12 @@ const TURN_USERNAME = import.meta.env.VITE_TURN_USERNAME || '';
 const TURN_PASSWORD = import.meta.env.VITE_TURN_PASSWORD || '';
 
 function getIceServers() {
-  const servers = [{ urls: 'stun:stun.l.google.com:19302' }];
+  // Enhanced STUN list for better NAT traversal success
+  const servers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' }
+  ];
 
   if (TURN_SERVER && TURN_USERNAME && TURN_PASSWORD) {
     servers.push({
@@ -71,22 +76,15 @@ function App() {
     delete pendingIceCandidatesRef.current[userId];
   };
 
-  // The Fix: Add Google's free STUN servers so the browsers can find each other on different networks
-  const configuration = {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' }
-    ]
-  };
-
-
+  // ✅ FIX: We removed the floating RTCPeerConnection from here.
 
   const createPeerConnection = (userId) => {
     if (peerConnectionsRef.current[userId]) {
       return peerConnectionsRef.current[userId];
     }
 
+    // ✅ FIX: Configuration is now safely scoped inside the function when a connection is actually needed.
+    const configuration = { iceServers: getIceServers() };
     const peerConnection = new RTCPeerConnection(configuration);
 
     localStreamRef.current?.getTracks().forEach((track) => {
