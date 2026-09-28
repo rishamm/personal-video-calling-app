@@ -7,10 +7,23 @@ function generateRoomId() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
 
-function getIceServers() {
-  // Keeping it to ONE reliable STUN server to prevent local router confusion
-  return [{ urls: 'stun:stun.l.google.com:19302' }];
-}
+// 🟢 FIX 1: Dedicated React component to prevent the video from flashing black
+const RemoteVideo = ({ stream, name }) => {
+  const videoRef = useRef(null);
+
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [stream]);
+
+  return (
+    <div className="video-card remote">
+      <video ref={videoRef} autoPlay playsInline />
+      <div className="video-tag">{name || 'Guest'}</div>
+    </div>
+  );
+};
 
 function App() {
   const [name, setName] = useState('Guest');
@@ -60,7 +73,7 @@ function App() {
     }
 
     console.log(`[WebRTC] Creating new PeerConnection for ${userId}`);
-    const configuration = { iceServers: getIceServers() };
+    const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
     const peerConnection = new RTCPeerConnection(configuration);
 
     if (localStreamRef.current) {
@@ -69,14 +82,16 @@ function App() {
       });
     }
 
+    // 🟢 FIX 2: Ensure ICE Candidates are being broadcasted
     peerConnection.onicecandidate = (event) => {
       if (event.candidate && socketRef.current) {
+        console.log(`[WebRTC] Generated ICE candidate, sending to ${userId}`);
         socketRef.current.emit('ice-candidate', { to: userId, candidate: event.candidate });
       }
     };
 
     peerConnection.ontrack = (event) => {
-      console.log(`[WebRTC] Received remote track from ${userId}`);
+      console.log(`[WebRTC] ✅ Received remote track from ${userId}`);
       const [remoteStream] = event.streams;
       if (remoteStream) {
         setRemoteStreams((prev) => ({ ...prev, [userId]: remoteStream }));
@@ -111,8 +126,9 @@ function App() {
     for (const candidate of pending) {
       try {
         await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        console.log(`[WebRTC] Applied queued ICE candidate from ${userId}`);
       } catch (err) {
-        console.warn('[WebRTC] Failed to add ICE candidate:', err);
+        console.warn('[WebRTC] Failed to add queued ICE candidate:', err);
       }
     }
   };
@@ -160,9 +176,8 @@ function App() {
   };
 
   async function getLocalStream() {
-    // SECURITY CHECK: Warn if accessing via HTTP (not localhost)
     if (window.location.protocol === 'http:' && window.location.hostname !== 'localhost') {
-      const msg = 'WebRTC blocks the camera on HTTP. You must use HTTPS or localhost to test this.';
+      const msg = 'WebRTC blocks the camera on HTTP. You must use HTTPS or localhost.';
       setError(msg);
       alert(msg);
       return null;
@@ -186,27 +201,21 @@ function App() {
   }
 
   useEffect(() => {
-    const socket = io(SOCKET_URL, {
-      transports: ['websocket'],
-    });
+    const socket = io(SOCKET_URL, { transports: ['websocket'] });
     socketRef.current = socket;
 
     socket.on('connect', () => console.log('[Socket] Connected to signaling server'));
 
     socket.on('current-users', (users) => {
-      console.log('[Socket] Current users in room:', users);
       setParticipants(users);
       users.forEach((user) => connectToUser(user.id));
     });
 
     socket.on('user-joined', (user) => {
-      console.log('[Socket] New user joined:', user.id);
       setParticipants((prev) => (prev.some((p) => p.id === user.id) ? prev : [...prev, user]));
-
     });
 
     socket.on('user-left', (userId) => {
-      console.log('[Socket] User left:', userId);
       setParticipants((prev) => prev.filter((p) => p.id !== userId));
       setRemoteStreams((prev) => {
         const next = { ...prev };
@@ -252,7 +261,9 @@ function App() {
     });
 
     socket.on('ice-candidate', async ({ from, candidate }) => {
+      console.log(`[Socket] ⚡ Received ICE candidate from ${from}`);
       const peerConnection = peerConnectionsRef.current[from];
+
       if (!peerConnection || !peerConnection.remoteDescription) {
         if (!pendingIceCandidatesRef.current[from]) pendingIceCandidatesRef.current[from] = [];
         pendingIceCandidatesRef.current[from].push(candidate);
@@ -261,6 +272,7 @@ function App() {
 
       try {
         await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        console.log(`[WebRTC] ⚡ Successfully added ICE candidate from ${from}`);
       } catch (err) {
         console.warn('[WebRTC] Failed to add ICE candidate:', err);
       }
@@ -277,19 +289,16 @@ function App() {
     if (!roomId.trim()) return setError('Room name is required.');
 
     const stream = await getLocalStream();
-    if (!stream) return; // Breaks out here if camera is blocked!
+    if (!stream) return;
 
     setJoined(true);
     setError('');
     socketRef.current?.emit('join-room', roomId.trim(), name.trim() || 'Guest');
   }
 
-  // --- HTML RENDER CODE REMAINS THE SAME, OMITTED FOR BREVITY ---
-  // Ensure you keep your return ( <div className="app-shell"> ... ) from your original code!
-
+  // --- HTML UI RENDER ---
   return (
     <div className="app-shell">
-      {/* (Keep your original UI code here) */}
       {!joined ? (
         <div className="join-panel">
           <div className="glass-card">
@@ -318,18 +327,23 @@ function App() {
               <button className="danger" onClick={() => window.location.reload()}>Leave</button>
             </div>
           </header>
+
+          {/* 🟢 FIX 3: Remote Video Component is safely wired up here */}
           <div className="video-grid">
             <div className="video-card local">
               <video ref={localVideoRef} autoPlay playsInline muted />
               <div className="video-tag">{name || 'You'}</div>
             </div>
+
             {Object.entries(remoteStreams).map(([userId, stream]) => (
-              <div className="video-card remote" key={userId}>
-                <video autoPlay playsInline ref={(el) => { if (el) el.srcObject = stream; }} />
-                <div className="video-tag">{participants.find((p) => p.id === userId)?.name || 'Guest'}</div>
-              </div>
+              <RemoteVideo
+                key={userId}
+                stream={stream}
+                name={participants.find((p) => p.id === userId)?.name}
+              />
             ))}
           </div>
+
         </div>
       )}
     </div>
