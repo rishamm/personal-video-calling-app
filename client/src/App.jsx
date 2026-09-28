@@ -12,11 +12,14 @@ const RemoteVideo = ({ stream, name }) => {
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
+      // Force play to bypass browser autoplay blocks that cause black screens
+      videoRef.current.play().catch(e => console.warn("Play prevented:", e));
     }
   }, [stream]);
   return (
-    <div className="video-card remote">
-      <video ref={videoRef} autoPlay playsInline style={{ transform: 'scaleX(-1)', width: '100%', height: '100%', objectFit: 'cover' }} />
+    <div className="video-card remote" style={{ width: '100%', height: '100%', position: 'relative', backgroundColor: '#111' }}>
+      {/* Removed scaleX(-1) so remote users aren't mirrored backward */}
+      <video ref={videoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
       <div className="video-tag" style={{ position: 'absolute', bottom: '10px', left: '10px', background: 'rgba(0,0,0,0.6)', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '14px' }}>
         {name || 'Guest'}
       </div>
@@ -29,10 +32,11 @@ const LocalVideo = ({ stream, name }) => {
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
+      videoRef.current.play().catch(e => console.warn("Play prevented:", e));
     }
   }, [stream]);
   return (
-    <div className="video-card local">
+    <div className="video-card local" style={{ width: '100%', height: '100%', position: 'relative', backgroundColor: '#111' }}>
       <video ref={videoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)', width: '100%', height: '100%', objectFit: 'cover' }} />
       <div className="video-tag" style={{ position: 'absolute', bottom: '10px', left: '10px', background: 'rgba(0,0,0,0.6)', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '14px' }}>
         {name || 'You'}
@@ -45,7 +49,7 @@ function App() {
   const [name, setName] = useState('Guest');
   const [roomId, setRoomId] = useState('');
   const [joined, setJoined] = useState(false);
-  const [isJoining, setIsJoining] = useState(false); // New loading state for instant feedback
+  const [isJoining, setIsJoining] = useState(false);
   const [error, setError] = useState('');
   const [participants, setParticipants] = useState([]);
   const [remoteStreams, setRemoteStreams] = useState({});
@@ -62,7 +66,16 @@ function App() {
   const pendingRemoteOffersRef = useRef({});
   const pendingIceCandidatesRef = useRef({});
 
-  // Auto-fill room ID if someone clicks a shared link
+  // 🚀 SILENT CAMERA WARM-UP: Starts allocating camera hardware the moment the page loads
+  useEffect(() => {
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      .then(stream => {
+        localStreamRef.current = stream;
+        setActiveLocalStream(stream);
+      })
+      .catch(() => { /* Ignore errors here, will show them properly when user clicks Join */ });
+  }, []);
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const roomFromUrl = params.get('room');
@@ -71,7 +84,6 @@ function App() {
     }
   }, []);
 
-  // Auto-switch Full Screen to the remote user when they join
   useEffect(() => {
     const remoteIds = Object.keys(remoteStreams);
     if (remoteIds.length > 0 && mainStreamId === 'local') {
@@ -82,24 +94,6 @@ function App() {
       setMainStreamId(remoteIds.length > 0 ? remoteIds[0] : 'local');
     }
   }, [remoteStreams, mainStreamId]);
-
-  // Made this non-blocking (fire and forget) so it doesn't delay connection
-  const applyLowBandwidthConstraints = (peerConnection) => {
-    try {
-      const senders = peerConnection.getSenders();
-      const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
-
-      if (videoSender && videoSender.getParameters) {
-        const parameters = videoSender.getParameters();
-        if (!parameters.encodings || parameters.encodings.length === 0) {
-          parameters.encodings = [{}];
-        }
-        parameters.encodings[0].maxBitrate = 400000;
-        parameters.encodings[0].maxFramerate = 24;
-        videoSender.setParameters(parameters).catch(() => { });
-      }
-    } catch (err) { }
-  };
 
   useEffect(() => {
     const handleVisibilityChange = async () => {
@@ -115,7 +109,6 @@ function App() {
               const videoSender = pc.getSenders().find((s) => s.track?.kind === 'video');
               if (videoSender && newStream.getVideoTracks()[0]) {
                 await videoSender.replaceTrack(newStream.getVideoTracks()[0]);
-                applyLowBandwidthConstraints(pc);
               }
               const audioSender = pc.getSenders().find((s) => s.track?.kind === 'audio');
               if (audioSender && newStream.getAudioTracks()[0]) {
@@ -166,7 +159,6 @@ function App() {
       localStreamRef.current.getTracks().forEach((track) => {
         peerConnection.addTrack(track, localStreamRef.current);
       });
-      applyLowBandwidthConstraints(peerConnection);
     }
 
     peerConnection.onicecandidate = (event) => {
@@ -244,7 +236,7 @@ function App() {
     negotiationLockRef.current[userId] = true;
 
     try {
-      const offer = await peerConnection.createOffer();
+      const offer = await peerConnection.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
       await peerConnection.setLocalDescription(offer);
       socketRef.current.emit('offer', { to: userId, offer });
       flushPendingIceCandidates(userId);
@@ -264,7 +256,7 @@ function App() {
         video: {
           width: { ideal: 640, max: 854 },
           height: { ideal: 360, max: 480 },
-          frameRate: { ideal: 15, max: 20 },
+          frameRate: { ideal: 15, max: 24 },
         },
         audio: {
           echoCancellation: true,
@@ -364,8 +356,13 @@ function App() {
   async function joinRoom(idToJoin = roomId) {
     if (!idToJoin.trim()) return setError('Room ID is required.');
 
-    setIsJoining(true); // Show instant loading state
-    const stream = await getLocalStream();
+    setIsJoining(true);
+
+    // Will be completely instantaneous if background warmup completed
+    let stream = activeLocalStream || localStreamRef.current;
+    if (!stream) {
+      stream = await getLocalStream();
+    }
 
     if (!stream) {
       setIsJoining(false);
@@ -445,10 +442,10 @@ function App() {
             </label>
             <div className="join-actions">
               <button onClick={() => joinRoom(roomId)} disabled={isJoining}>
-                {isJoining ? 'Starting camera...' : 'Join room'}
+                {isJoining ? 'Connecting...' : 'Join room'}
               </button>
               <button className="secondary" onClick={handleCreateAndJoin} disabled={isJoining}>
-                {isJoining ? 'Starting camera...' : 'Create & Join'}
+                {isJoining ? 'Connecting...' : 'Create & Join'}
               </button>
             </div>
             {error && <p className="error" style={{ color: 'red', fontWeight: 'bold' }}>{error}</p>}
