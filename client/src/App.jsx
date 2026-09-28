@@ -202,7 +202,7 @@ function App() {
     socket.on('user-joined', (user) => {
       console.log('[Socket] New user joined:', user.id);
       setParticipants((prev) => (prev.some((p) => p.id === user.id) ? prev : [...prev, user]));
-      if (user.id !== socket.id) connectToUser(user.id);
+
     });
 
     socket.on('user-left', (userId) => {
