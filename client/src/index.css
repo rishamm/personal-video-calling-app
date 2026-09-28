@@ -171,14 +171,10 @@ input {
   border: 1px solid rgba(148, 163, 184, 0.25);
 }
 
-.video-card.local video {
+.video-card.local video,
+.video-card.remote video {
   transform: scaleX(-1);
   -webkit-transform: scaleX(-1);
-}
-
-.video-card.remote video {
-  transform: none;
-  -webkit-transform: none;
 }
 
 .video-card video {
