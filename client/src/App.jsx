@@ -7,7 +7,6 @@ function generateRoomId() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
 
-// 🟢 FIX 1: Dedicated React component to prevent the video from flashing black
 const RemoteVideo = ({ stream, name }) => {
   const videoRef = useRef(null);
 
@@ -32,6 +31,8 @@ function App() {
   const [error, setError] = useState('');
   const [participants, setParticipants] = useState([]);
   const [remoteStreams, setRemoteStreams] = useState({});
+
+  // Controls state
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
 
@@ -43,24 +44,20 @@ function App() {
   const pendingRemoteOffersRef = useRef({});
   const pendingIceCandidatesRef = useRef({});
 
-  const attachLocalPreview = (stream) => {
-    if (!localVideoRef.current || !stream) return;
-    localVideoRef.current.srcObject = stream;
-    localVideoRef.current.muted = true;
-    localVideoRef.current.playsInline = true;
-    localVideoRef.current.autoplay = true;
-  };
+  // 🟢 FIX 1: Attach local video safely AFTER the screen loads
+  useEffect(() => {
+    if (joined && localVideoRef.current && localStreamRef.current) {
+      localVideoRef.current.srcObject = localStreamRef.current;
+    }
+  }, [joined]);
 
   const closePeerConnection = (userId) => {
-    console.log(`[WebRTC] Closing connection for ${userId}`);
     const pc = peerConnectionsRef.current[userId];
     if (!pc) return;
-
     pc.ontrack = null;
     pc.onicecandidate = null;
     pc.onconnectionstatechange = null;
     pc.close();
-
     delete peerConnectionsRef.current[userId];
     delete negotiationLockRef.current[userId];
     delete pendingRemoteOffersRef.current[userId];
@@ -68,11 +65,8 @@ function App() {
   };
 
   const createPeerConnection = (userId) => {
-    if (peerConnectionsRef.current[userId]) {
-      return peerConnectionsRef.current[userId];
-    }
+    if (peerConnectionsRef.current[userId]) return peerConnectionsRef.current[userId];
 
-    console.log(`[WebRTC] Creating new PeerConnection for ${userId}`);
     const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
     const peerConnection = new RTCPeerConnection(configuration);
 
@@ -82,16 +76,13 @@ function App() {
       });
     }
 
-    // 🟢 FIX 2: Ensure ICE Candidates are being broadcasted
     peerConnection.onicecandidate = (event) => {
       if (event.candidate && socketRef.current) {
-        console.log(`[WebRTC] Generated ICE candidate, sending to ${userId}`);
         socketRef.current.emit('ice-candidate', { to: userId, candidate: event.candidate });
       }
     };
 
     peerConnection.ontrack = (event) => {
-      console.log(`[WebRTC] ✅ Received remote track from ${userId}`);
       const [remoteStream] = event.streams;
       if (remoteStream) {
         setRemoteStreams((prev) => ({ ...prev, [userId]: remoteStream }));
@@ -99,7 +90,6 @@ function App() {
     };
 
     peerConnection.onconnectionstatechange = () => {
-      console.log(`[WebRTC] Connection state with ${userId}: ${peerConnection.connectionState}`);
       if (
         peerConnection.connectionState === 'failed' ||
         peerConnection.connectionState === 'disconnected' ||
@@ -116,20 +106,14 @@ function App() {
   const flushPendingIceCandidates = async (userId) => {
     const candidates = pendingIceCandidatesRef.current[userId] || [];
     if (candidates.length === 0) return;
-
     const peerConnection = peerConnectionsRef.current[userId];
     if (!peerConnection) return;
-
     const pending = [...candidates];
     delete pendingIceCandidatesRef.current[userId];
 
     for (const candidate of pending) {
-      try {
-        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-        console.log(`[WebRTC] Applied queued ICE candidate from ${userId}`);
-      } catch (err) {
-        console.warn('[WebRTC] Failed to add queued ICE candidate:', err);
-      }
+      try { await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); }
+      catch (err) { console.warn('Failed ICE:', err); }
     }
   };
 
@@ -137,23 +121,19 @@ function App() {
     const pendingOffer = pendingRemoteOffersRef.current[userId];
     if (!pendingOffer) return;
     delete pendingRemoteOffersRef.current[userId];
-
     const peerConnection = createPeerConnection(userId);
 
     if (peerConnection.signalingState !== 'stable') {
       pendingRemoteOffersRef.current[userId] = pendingOffer;
       return;
     }
-
     try {
       await peerConnection.setRemoteDescription(new RTCSessionDescription(pendingOffer));
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
       socketRef.current.emit('answer', { to: userId, answer });
       await flushPendingIceCandidates(userId);
-    } catch (err) {
-      console.error('[WebRTC] Failed to flush pending offer:', err);
-    }
+    } catch (err) { console.error('Failed to flush offer:', err); }
   };
 
   const connectToUser = async (userId) => {
@@ -164,37 +144,25 @@ function App() {
     negotiationLockRef.current[userId] = true;
 
     try {
-      console.log(`[WebRTC] Creating offer for ${userId}`);
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
       socketRef.current.emit('offer', { to: userId, offer });
       await flushPendingIceCandidates(userId);
     } catch (err) {
-      console.error('[WebRTC] Failed to create offer:', err);
       delete negotiationLockRef.current[userId];
     }
   };
 
   async function getLocalStream() {
     if (window.location.protocol === 'http:' && window.location.hostname !== 'localhost') {
-      const msg = 'WebRTC blocks the camera on HTTP. You must use HTTPS or localhost.';
-      setError(msg);
-      alert(msg);
+      setError('WebRTC blocks the camera on HTTP. You must use HTTPS or localhost.');
       return null;
     }
-
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setError('Browser does not support camera/mic access.');
-      return null;
-    }
-
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localStreamRef.current = stream;
-      attachLocalPreview(stream);
       return stream;
     } catch (err) {
-      console.error('[WebRTC] Media access failed:', err);
       setError('Camera/Mic access denied. Check your browser permissions.');
       return null;
     }
@@ -203,8 +171,6 @@ function App() {
   useEffect(() => {
     const socket = io(SOCKET_URL, { transports: ['websocket'] });
     socketRef.current = socket;
-
-    socket.on('connect', () => console.log('[Socket] Connected to signaling server'));
 
     socket.on('current-users', (users) => {
       setParticipants(users);
@@ -226,56 +192,39 @@ function App() {
     });
 
     socket.on('offer', async ({ from, offer }) => {
-      console.log(`[Socket] Received offer from ${from}`);
       const peerConnection = createPeerConnection(from);
-
       if (peerConnection.signalingState !== 'stable') {
         pendingRemoteOffersRef.current[from] = offer;
         return;
       }
-
       try {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
         socket.emit('answer', { to: from, answer });
         await flushPendingIceCandidates(from);
-      } catch (err) {
-        console.error('[WebRTC] Error handling offer:', err);
-      }
+      } catch (err) { }
     });
 
     socket.on('answer', async ({ from, answer }) => {
-      console.log(`[Socket] Received answer from ${from}`);
       const peerConnection = peerConnectionsRef.current[from];
       if (!peerConnection || peerConnection.signalingState !== 'have-local-offer') return;
-
       try {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
         delete negotiationLockRef.current[from];
         await flushPendingIceCandidates(from);
         await flushPendingOffer(from);
-      } catch (err) {
-        console.error('[WebRTC] Error handling answer:', err);
-      }
+      } catch (err) { }
     });
 
     socket.on('ice-candidate', async ({ from, candidate }) => {
-      console.log(`[Socket] ⚡ Received ICE candidate from ${from}`);
       const peerConnection = peerConnectionsRef.current[from];
-
       if (!peerConnection || !peerConnection.remoteDescription) {
         if (!pendingIceCandidatesRef.current[from]) pendingIceCandidatesRef.current[from] = [];
         pendingIceCandidatesRef.current[from].push(candidate);
         return;
       }
-
-      try {
-        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-        console.log(`[WebRTC] ⚡ Successfully added ICE candidate from ${from}`);
-      } catch (err) {
-        console.warn('[WebRTC] Failed to add ICE candidate:', err);
-      }
+      try { await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); } catch (err) { }
     });
 
     return () => {
@@ -287,7 +236,6 @@ function App() {
 
   async function joinRoom() {
     if (!roomId.trim()) return setError('Room name is required.');
-
     const stream = await getLocalStream();
     if (!stream) return;
 
@@ -296,52 +244,68 @@ function App() {
     socketRef.current?.emit('join-room', roomId.trim(), name.trim() || 'Guest');
   }
 
-  // --- HTML UI RENDER ---
+  // 🟢 FIX 2: Added Hardware Controls
+  const toggleMute = () => {
+    if (localStreamRef.current) {
+      const audioTrack = localStreamRef.current.getAudioTracks()[0];
+      if (audioTrack) {
+        audioTrack.enabled = !audioTrack.enabled;
+        setIsMuted(!audioTrack.enabled);
+      }
+    }
+  };
+
+  const toggleVideo = () => {
+    if (localStreamRef.current) {
+      const videoTrack = localStreamRef.current.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.enabled = !videoTrack.enabled;
+        setIsCameraOff(!videoTrack.enabled);
+      }
+    }
+  };
+
   return (
-    <div className="app-shell">
+    <div className="app-shell" style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#121212', color: 'white' }}>
       {!joined ? (
-        <div className="join-panel">
-          <div className="glass-card">
-            <h1>Video Call</h1>
-            <p>Join a room instantly. No login required.</p>
-            <label>
-              Your name
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Guest" />
-            </label>
-            <label>
-              Room ID
-              <input value={roomId} onChange={(e) => setRoomId(e.target.value)} placeholder="Example: FAMILY123" />
-            </label>
-            <div className="join-actions">
-              <button onClick={joinRoom}>Join room</button>
-              <button className="secondary" onClick={() => setRoomId(generateRoomId())}>Generate room</button>
-            </div>
-            {error && <p className="error" style={{ color: 'red', fontWeight: 'bold' }}>{error}</p>}
+        <div style={{ margin: 'auto', padding: '2rem', background: '#222', borderRadius: '12px', textAlign: 'center' }}>
+          <h1>Video Call</h1>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
+            <input style={{ padding: '0.8rem' }} value={name} onChange={(e) => setName(e.target.value)} placeholder="Your Name" />
+            <input style={{ padding: '0.8rem' }} value={roomId} onChange={(e) => setRoomId(e.target.value)} placeholder="Room ID" />
+            <button style={{ padding: '1rem', background: '#4CAF50', color: 'white', border: 'none', cursor: 'pointer' }} onClick={joinRoom}>Join Room</button>
           </div>
+          {error && <p style={{ color: '#ff4444', marginTop: '1rem' }}>{error}</p>}
         </div>
       ) : (
-        <div className="call-layout">
-          <header className="top-bar">
-            <div><span className="label">Room</span><h2>{roomId}</h2></div>
-            <div className="header-actions">
-              <button className="danger" onClick={() => window.location.reload()}>Leave</button>
-            </div>
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+
+          <header style={{ display: 'flex', justifyContent: 'space-between', padding: '1rem', background: '#1a1a1a' }}>
+            <h2>Room: {roomId}</h2>
+            <button onClick={() => window.location.reload()} style={{ background: '#ff4444', color: 'white', border: 'none', padding: '0.5rem 1rem', borderRadius: '6px' }}>Leave Call</button>
           </header>
 
-          {/* 🟢 FIX 3: Remote Video Component is safely wired up here */}
-          <div className="video-grid">
-            <div className="video-card local">
-              <video ref={localVideoRef} autoPlay playsInline muted />
-              <div className="video-tag">{name || 'You'}</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', padding: '1rem', flex: 1, justifyContent: 'center' }}>
+
+            <div style={{ position: 'relative', width: '300px', height: '225px', background: 'black', borderRadius: '8px', overflow: 'hidden' }}>
+              <video ref={localVideoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              <div style={{ position: 'absolute', bottom: '10px', left: '10px', background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: '4px' }}>{name || 'You'}</div>
             </div>
 
             {Object.entries(remoteStreams).map(([userId, stream]) => (
-              <RemoteVideo
-                key={userId}
-                stream={stream}
-                name={participants.find((p) => p.id === userId)?.name}
-              />
+              <RemoteVideo key={userId} stream={stream} name={participants.find((p) => p.id === userId)?.name} />
             ))}
+
+          </div>
+
+          {/* 🟢 FIX 3: Hardware Control Buttons added to the UI */}
+          <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem', padding: '1rem', background: '#1a1a1a' }}>
+            <button onClick={toggleMute} style={{ padding: '1rem', background: isMuted ? '#ff4444' : '#4CAF50', color: 'white', border: 'none', borderRadius: '50px', cursor: 'pointer', width: '120px' }}>
+              {isMuted ? 'Unmute' : 'Mute'}
+            </button>
+            <button onClick={toggleVideo} style={{ padding: '1rem', background: isCameraOff ? '#ff4444' : '#2196F3', color: 'white', border: 'none', borderRadius: '50px', cursor: 'pointer', width: '120px' }}>
+              {isCameraOff ? 'Turn Video On' : 'Turn Video Off'}
+            </button>
           </div>
 
         </div>
