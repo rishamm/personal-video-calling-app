@@ -15,9 +15,11 @@ const RemoteVideo = ({ stream, name }) => {
     }
   }, [stream]);
   return (
-    <div className="video-card remote">
-      <video ref={videoRef} autoPlay playsInline style={{ transform: 'scaleX(-1)' }} />
-      <div className="video-tag">{name || 'Guest'}</div>
+    <div className="video-card remote" style={{ width: '100%', height: '100%', position: 'relative' }}>
+      <video ref={videoRef} autoPlay playsInline style={{ transform: 'scaleX(-1)', width: '100%', height: '100%', objectFit: 'cover' }} />
+      <div className="video-tag" style={{ position: 'absolute', bottom: '10px', left: '10px', background: 'rgba(0,0,0,0.6)', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '14px' }}>
+        {name || 'Guest'}
+      </div>
     </div>
   );
 };
@@ -30,9 +32,11 @@ const LocalVideo = ({ stream, name }) => {
     }
   }, [stream]);
   return (
-    <div className="video-card local">
-      <video ref={videoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} />
-      <div className="video-tag">{name || 'You'}</div>
+    <div className="video-card local" style={{ width: '100%', height: '100%', position: 'relative' }}>
+      <video ref={videoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)', width: '100%', height: '100%', objectFit: 'cover' }} />
+      <div className="video-tag" style={{ position: 'absolute', bottom: '10px', left: '10px', background: 'rgba(0,0,0,0.6)', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '14px' }}>
+        {name || 'You'}
+      </div>
     </div>
   );
 };
@@ -56,6 +60,16 @@ function App() {
   const negotiationLockRef = useRef({});
   const pendingRemoteOffersRef = useRef({});
   const pendingIceCandidatesRef = useRef({});
+
+  // Prompt for camera immediately on mount (Lobby Preview)
+  useEffect(() => {
+    const initPreJoinStream = async () => {
+      if (!activeLocalStream) {
+        await getLocalStream();
+      }
+    };
+    initPreJoinStream();
+  }, []);
 
   // Auto-fill room ID if someone clicks a shared link
   useEffect(() => {
@@ -138,7 +152,6 @@ function App() {
     delete pendingRemoteOffersRef.current[userId];
     delete pendingIceCandidatesRef.current[userId];
 
-    // Clear video immediately to prevent frozen frame if disconnected
     setRemoteStreams((prev) => {
       const next = { ...prev };
       delete next[userId];
@@ -152,7 +165,7 @@ function App() {
     const configuration = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:global.stun.twilio.com:3478' } // Secondary fallback to ensure connectivity
+        { urls: 'stun:global.stun.twilio.com:3478' }
       ],
       iceCandidatePoolSize: 2
     };
@@ -183,7 +196,6 @@ function App() {
       const state = peerConnection.connectionState;
       if (state === 'failed' || state === 'disconnected' || state === 'closed') {
         closePeerConnection(userId);
-        // Robust reconnect mechanism: Try to rebuild connection if we dropped
         setParticipants(prev => {
           const stillInRoom = prev.some(p => p.id === userId);
           if (stillInRoom && socketRef.current?.id < userId) {
@@ -249,9 +261,7 @@ function App() {
       await flushPendingIceCandidates(userId);
       await applyLowBandwidthConstraints(peerConnection);
     } catch (err) {
-      // Allow retry if failed
     } finally {
-      // Clear lock after a timeout just in case it deadlocks
       setTimeout(() => {
         if (negotiationLockRef.current) {
           delete negotiationLockRef.current[userId];
@@ -284,7 +294,7 @@ function App() {
       setActiveLocalStream(stream);
       return stream;
     } catch (err) {
-      setError('Camera/Mic access denied.');
+      setError('Camera/Mic access denied. Please allow permissions.');
       return null;
     }
   }
@@ -306,7 +316,6 @@ function App() {
     socket.on('current-users', (users) => {
       setParticipants(users);
       const myId = socket.id;
-      // Guaranteed to only trigger one side to initiate the offer preventing glares
       users.forEach((user) => {
         if (myId < user.id) connectToUser(user.id);
       });
@@ -315,7 +324,6 @@ function App() {
     socket.on('user-joined', (user) => {
       setParticipants((prev) => (prev.some((p) => p.id === user.id) ? prev : [...prev, user]));
       const myId = socket.id;
-      // Guaranteed to only trigger one side to initiate the offer preventing glares
       if (myId < user.id) connectToUser(user.id);
     });
 
@@ -372,7 +380,12 @@ function App() {
 
   async function joinRoom(idToJoin = roomId) {
     if (!idToJoin.trim()) return setError('Room ID is required.');
-    const stream = await getLocalStream();
+
+    // Use stream if already loaded from Lobby, otherwise request it
+    let stream = activeLocalStream;
+    if (!stream) {
+      stream = await getLocalStream();
+    }
     if (!stream) return;
 
     setJoined(true);
@@ -433,8 +446,20 @@ function App() {
   return (
     <div className="app-shell">
       {!joined ? (
-        <div className="join-panel">
-          <div className="glass-card">
+        <div className="join-panel" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '30px', padding: '20px' }}>
+
+          {/* LOBBY PREVIEW */}
+          <div style={{ width: '100%', maxWidth: '500px', aspectRatio: '16/9', backgroundColor: '#111', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 8px 24px rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)' }}>
+            {activeLocalStream ? (
+              <LocalVideo stream={activeLocalStream} name={name || 'You'} />
+            ) : (
+              <div style={{ display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center', color: '#888', padding: '20px', textAlign: 'center' }}>
+                {error || 'Starting camera... Please allow permissions to preview.'}
+              </div>
+            )}
+          </div>
+
+          <div className="glass-card" style={{ width: '100%', maxWidth: '500px' }}>
             <h1>Video Call</h1>
             <p>Join a room instantly. No login required.</p>
             <label>
@@ -471,7 +496,7 @@ function App() {
           </header>
 
           {/* Main + PiP Display */}
-          <div style={{ position: 'relative', flex: 1, width: '100%', height: '100%', minHeight: '600px', display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          <div style={{ position: 'relative', flex: 1, width: '100%', height: '100%', minHeight: '600px', display: 'flex', justifyContent: 'center', alignItems: 'center', backgroundColor: '#000' }}>
 
             {/* Main Full-Screen Video */}
             <div style={{ width: '100%', height: '100%', position: 'absolute', inset: 0 }}>
@@ -528,6 +553,7 @@ function App() {
                   onClick={() => setMainStreamId(s.id)}
                   style={{
                     width: '140px',
+                    aspectRatio: '16/9',
                     cursor: 'pointer',
                     borderRadius: '8px',
                     overflow: 'hidden',
