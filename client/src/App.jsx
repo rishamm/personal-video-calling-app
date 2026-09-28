@@ -71,15 +71,23 @@ function App() {
     delete pendingIceCandidatesRef.current[userId];
   };
 
+  // The Fix: Add Google's free STUN servers so the browsers can find each other on different networks
+  const configuration = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' }
+    ]
+  };
+
+  const peerConnection = new RTCPeerConnection(configuration);
+
   const createPeerConnection = (userId) => {
     if (peerConnectionsRef.current[userId]) {
       return peerConnectionsRef.current[userId];
     }
 
-    const peerConnection = new RTCPeerConnection({
-      iceServers: getIceServers(),
-      iceCandidatePoolSize: 10,
-    });
+    const peerConnection = new RTCPeerConnection(configuration);
 
     localStreamRef.current?.getTracks().forEach((track) => {
       peerConnection.addTrack(track, localStreamRef.current);
