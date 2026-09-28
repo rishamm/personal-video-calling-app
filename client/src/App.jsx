@@ -80,7 +80,7 @@ function App() {
     ]
   };
 
-  const peerConnection = new RTCPeerConnection(configuration);
+
 
   const createPeerConnection = (userId) => {
     if (peerConnectionsRef.current[userId]) {
