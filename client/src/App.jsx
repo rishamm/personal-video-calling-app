@@ -7,19 +7,34 @@ function generateRoomId() {
   return Math.random().toString(36).slice(2, 8).toUpperCase();
 }
 
+// 🟢 COMPONENT: Safely handles Remote Videos with Mirroring
 const RemoteVideo = ({ stream, name }) => {
   const videoRef = useRef(null);
-
   useEffect(() => {
     if (videoRef.current && stream) {
       videoRef.current.srcObject = stream;
     }
   }, [stream]);
-
   return (
     <div className="video-card remote">
-      <video ref={videoRef} autoPlay playsInline />
+      <video ref={videoRef} autoPlay playsInline style={{ transform: 'scaleX(-1)' }} />
       <div className="video-tag">{name || 'Guest'}</div>
+    </div>
+  );
+};
+
+// 🟢 COMPONENT: Safely handles Local Video with Mirroring
+const LocalVideo = ({ stream, name }) => {
+  const videoRef = useRef(null);
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [stream]);
+  return (
+    <div className="video-card local">
+      <video ref={videoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)' }} />
+      <div className="video-tag">{name || 'You'}</div>
     </div>
   );
 };
@@ -31,25 +46,18 @@ function App() {
   const [error, setError] = useState('');
   const [participants, setParticipants] = useState([]);
   const [remoteStreams, setRemoteStreams] = useState({});
-
-  // Controls state
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOff, setIsCameraOff] = useState(false);
 
   const socketRef = useRef(null);
-  const localVideoRef = useRef(null);
   const localStreamRef = useRef(null);
   const peerConnectionsRef = useRef({});
   const negotiationLockRef = useRef({});
   const pendingRemoteOffersRef = useRef({});
   const pendingIceCandidatesRef = useRef({});
 
-  // 🟢 FIX 1: Attach local video safely AFTER the screen loads
-  useEffect(() => {
-    if (joined && localVideoRef.current && localStreamRef.current) {
-      localVideoRef.current.srcObject = localStreamRef.current;
-    }
-  }, [joined]);
+  // Stream state to pass to LocalVideo component
+  const [activeLocalStream, setActiveLocalStream] = useState(null);
 
   const closePeerConnection = (userId) => {
     const pc = peerConnectionsRef.current[userId];
@@ -67,7 +75,13 @@ function App() {
   const createPeerConnection = (userId) => {
     if (peerConnectionsRef.current[userId]) return peerConnectionsRef.current[userId];
 
-    const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    const configuration = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        // Add your TURN servers here if STUN fails across networks!
+      ]
+    };
+
     const peerConnection = new RTCPeerConnection(configuration);
 
     if (localStreamRef.current) {
@@ -108,12 +122,13 @@ function App() {
     if (candidates.length === 0) return;
     const peerConnection = peerConnectionsRef.current[userId];
     if (!peerConnection) return;
+
     const pending = [...candidates];
     delete pendingIceCandidatesRef.current[userId];
 
     for (const candidate of pending) {
       try { await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); }
-      catch (err) { console.warn('Failed ICE:', err); }
+      catch (err) { }
     }
   };
 
@@ -121,19 +136,20 @@ function App() {
     const pendingOffer = pendingRemoteOffersRef.current[userId];
     if (!pendingOffer) return;
     delete pendingRemoteOffersRef.current[userId];
-    const peerConnection = createPeerConnection(userId);
 
+    const peerConnection = createPeerConnection(userId);
     if (peerConnection.signalingState !== 'stable') {
       pendingRemoteOffersRef.current[userId] = pendingOffer;
       return;
     }
+
     try {
       await peerConnection.setRemoteDescription(new RTCSessionDescription(pendingOffer));
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
       socketRef.current.emit('answer', { to: userId, answer });
       await flushPendingIceCandidates(userId);
-    } catch (err) { console.error('Failed to flush offer:', err); }
+    } catch (err) { }
   };
 
   const connectToUser = async (userId) => {
@@ -161,9 +177,10 @@ function App() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localStreamRef.current = stream;
+      setActiveLocalStream(stream); // Triggers LocalVideo render
       return stream;
     } catch (err) {
-      setError('Camera/Mic access denied. Check your browser permissions.');
+      setError('Camera/Mic access denied.');
       return null;
     }
   }
@@ -224,7 +241,8 @@ function App() {
         pendingIceCandidatesRef.current[from].push(candidate);
         return;
       }
-      try { await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); } catch (err) { }
+      try { await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); }
+      catch (err) { }
     });
 
     return () => {
@@ -244,7 +262,6 @@ function App() {
     socketRef.current?.emit('join-room', roomId.trim(), name.trim() || 'Guest');
   }
 
-  // 🟢 FIX 2: Added Hardware Controls
   const toggleMute = () => {
     if (localStreamRef.current) {
       const audioTrack = localStreamRef.current.getAudioTracks()[0];
@@ -266,48 +283,56 @@ function App() {
   };
 
   return (
-    <div className="app-shell" style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#121212', color: 'white' }}>
+    <div className="app-shell">
       {!joined ? (
-        <div style={{ margin: 'auto', padding: '2rem', background: '#222', borderRadius: '12px', textAlign: 'center' }}>
-          <h1>Video Call</h1>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
-            <input style={{ padding: '0.8rem' }} value={name} onChange={(e) => setName(e.target.value)} placeholder="Your Name" />
-            <input style={{ padding: '0.8rem' }} value={roomId} onChange={(e) => setRoomId(e.target.value)} placeholder="Room ID" />
-            <button style={{ padding: '1rem', background: '#4CAF50', color: 'white', border: 'none', cursor: 'pointer' }} onClick={joinRoom}>Join Room</button>
+        <div className="join-panel">
+          <div className="glass-card">
+            <h1>Video Call</h1>
+            <p>Join a room instantly. No login required.</p>
+            <label>
+              Your name
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Guest" />
+            </label>
+            <label>
+              Room ID
+              <input value={roomId} onChange={(e) => setRoomId(e.target.value)} placeholder="Example: FAMILY123" />
+            </label>
+            <div className="join-actions">
+              <button onClick={joinRoom}>Join room</button>
+              <button className="secondary" onClick={() => setRoomId(generateRoomId())}>Generate room</button>
+            </div>
+            {error && <p className="error" style={{ color: 'red', fontWeight: 'bold' }}>{error}</p>}
           </div>
-          {error && <p style={{ color: '#ff4444', marginTop: '1rem' }}>{error}</p>}
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-
-          <header style={{ display: 'flex', justifyContent: 'space-between', padding: '1rem', background: '#1a1a1a' }}>
-            <h2>Room: {roomId}</h2>
-            <button onClick={() => window.location.reload()} style={{ background: '#ff4444', color: 'white', border: 'none', padding: '0.5rem 1rem', borderRadius: '6px' }}>Leave Call</button>
+        <div className="call-layout">
+          <header className="top-bar">
+            <div><span className="label">Room</span><h2>{roomId}</h2></div>
+            <div className="header-actions">
+              {/* Media Controls added to the header next to Leave button */}
+              <button className={isMuted ? "danger" : "secondary"} onClick={toggleMute} style={{ marginRight: '10px' }}>
+                {isMuted ? 'Unmute' : 'Mute'}
+              </button>
+              <button className={isCameraOff ? "danger" : "secondary"} onClick={toggleVideo} style={{ marginRight: '20px' }}>
+                {isCameraOff ? 'Camera On' : 'Camera Off'}
+              </button>
+              <button className="danger" onClick={() => window.location.reload()}>Leave</button>
+            </div>
           </header>
 
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', padding: '1rem', flex: 1, justifyContent: 'center' }}>
+          <div className="video-grid">
+            {/* The Local Video is now perfectly synced with React */}
+            <LocalVideo stream={activeLocalStream} name={name} />
 
-            <div style={{ position: 'relative', width: '300px', height: '225px', background: 'black', borderRadius: '8px', overflow: 'hidden' }}>
-              <video ref={localVideoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-              <div style={{ position: 'absolute', bottom: '10px', left: '10px', background: 'rgba(0,0,0,0.5)', padding: '4px 8px', borderRadius: '4px' }}>{name || 'You'}</div>
-            </div>
-
+            {/* Remote Videos */}
             {Object.entries(remoteStreams).map(([userId, stream]) => (
-              <RemoteVideo key={userId} stream={stream} name={participants.find((p) => p.id === userId)?.name} />
+              <RemoteVideo
+                key={userId}
+                stream={stream}
+                name={participants.find((p) => p.id === userId)?.name}
+              />
             ))}
-
           </div>
-
-          {/* 🟢 FIX 3: Hardware Control Buttons added to the UI */}
-          <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem', padding: '1rem', background: '#1a1a1a' }}>
-            <button onClick={toggleMute} style={{ padding: '1rem', background: isMuted ? '#ff4444' : '#4CAF50', color: 'white', border: 'none', borderRadius: '50px', cursor: 'pointer', width: '120px' }}>
-              {isMuted ? 'Unmute' : 'Mute'}
-            </button>
-            <button onClick={toggleVideo} style={{ padding: '1rem', background: isCameraOff ? '#ff4444' : '#2196F3', color: 'white', border: 'none', borderRadius: '50px', cursor: 'pointer', width: '120px' }}>
-              {isCameraOff ? 'Turn Video On' : 'Turn Video Off'}
-            </button>
-          </div>
-
         </div>
       )}
     </div>
