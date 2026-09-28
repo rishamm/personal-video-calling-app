@@ -15,7 +15,7 @@ const RemoteVideo = ({ stream, name }) => {
     }
   }, [stream]);
   return (
-    <div className="video-card remote" style={{ width: '100%', height: '100%', position: 'relative' }}>
+    <div className="video-card remote">
       <video ref={videoRef} autoPlay playsInline style={{ transform: 'scaleX(-1)', width: '100%', height: '100%', objectFit: 'cover' }} />
       <div className="video-tag" style={{ position: 'absolute', bottom: '10px', left: '10px', background: 'rgba(0,0,0,0.6)', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '14px' }}>
         {name || 'Guest'}
@@ -32,7 +32,7 @@ const LocalVideo = ({ stream, name }) => {
     }
   }, [stream]);
   return (
-    <div className="video-card local" style={{ width: '100%', height: '100%', position: 'relative' }}>
+    <div className="video-card local">
       <video ref={videoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)', width: '100%', height: '100%', objectFit: 'cover' }} />
       <div className="video-tag" style={{ position: 'absolute', bottom: '10px', left: '10px', background: 'rgba(0,0,0,0.6)', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '14px' }}>
         {name || 'You'}
@@ -45,6 +45,7 @@ function App() {
   const [name, setName] = useState('Guest');
   const [roomId, setRoomId] = useState('');
   const [joined, setJoined] = useState(false);
+  const [isJoining, setIsJoining] = useState(false); // New loading state for instant feedback
   const [error, setError] = useState('');
   const [participants, setParticipants] = useState([]);
   const [remoteStreams, setRemoteStreams] = useState({});
@@ -60,16 +61,6 @@ function App() {
   const negotiationLockRef = useRef({});
   const pendingRemoteOffersRef = useRef({});
   const pendingIceCandidatesRef = useRef({});
-
-  // Prompt for camera immediately on mount (Lobby Preview)
-  useEffect(() => {
-    const initPreJoinStream = async () => {
-      if (!activeLocalStream) {
-        await getLocalStream();
-      }
-    };
-    initPreJoinStream();
-  }, []);
 
   // Auto-fill room ID if someone clicks a shared link
   useEffect(() => {
@@ -92,21 +83,21 @@ function App() {
     }
   }, [remoteStreams, mainStreamId]);
 
-  const applyLowBandwidthConstraints = async (peerConnection) => {
-    const senders = peerConnection.getSenders();
-    const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
-
-    if (!videoSender || !videoSender.getParameters) return;
-
+  // Made this non-blocking (fire and forget) so it doesn't delay connection
+  const applyLowBandwidthConstraints = (peerConnection) => {
     try {
-      const parameters = videoSender.getParameters();
-      if (!parameters.encodings || parameters.encodings.length === 0) {
-        parameters.encodings = [{}];
+      const senders = peerConnection.getSenders();
+      const videoSender = senders.find((s) => s.track && s.track.kind === 'video');
+
+      if (videoSender && videoSender.getParameters) {
+        const parameters = videoSender.getParameters();
+        if (!parameters.encodings || parameters.encodings.length === 0) {
+          parameters.encodings = [{}];
+        }
+        parameters.encodings[0].maxBitrate = 400000;
+        parameters.encodings[0].maxFramerate = 24;
+        videoSender.setParameters(parameters).catch(() => { });
       }
-      parameters.encodings[0].maxBitrate = 200000;
-      parameters.encodings[0].scaleResolutionDownBy = 1.5;
-      parameters.encodings[0].maxFramerate = 15;
-      await videoSender.setParameters(parameters);
     } catch (err) { }
   };
 
@@ -124,7 +115,7 @@ function App() {
               const videoSender = pc.getSenders().find((s) => s.track?.kind === 'video');
               if (videoSender && newStream.getVideoTracks()[0]) {
                 await videoSender.replaceTrack(newStream.getVideoTracks()[0]);
-                await applyLowBandwidthConstraints(pc);
+                applyLowBandwidthConstraints(pc);
               }
               const audioSender = pc.getSenders().find((s) => s.track?.kind === 'audio');
               if (audioSender && newStream.getAudioTracks()[0]) {
@@ -166,8 +157,7 @@ function App() {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:global.stun.twilio.com:3478' }
-      ],
-      iceCandidatePoolSize: 2
+      ]
     };
 
     const peerConnection = new RTCPeerConnection(configuration);
@@ -199,7 +189,7 @@ function App() {
         setParticipants(prev => {
           const stillInRoom = prev.some(p => p.id === userId);
           if (stillInRoom && socketRef.current?.id < userId) {
-            setTimeout(() => connectToUser(userId), 2000);
+            setTimeout(() => connectToUser(userId), 1500);
           }
           return prev;
         });
@@ -214,7 +204,7 @@ function App() {
     const candidates = pendingIceCandidatesRef.current[userId] || [];
     if (candidates.length === 0) return;
     const peerConnection = peerConnectionsRef.current[userId];
-    if (!peerConnection) return;
+    if (!peerConnection || !peerConnection.remoteDescription) return;
 
     const pending = [...candidates];
     delete pendingIceCandidatesRef.current[userId];
@@ -241,8 +231,7 @@ function App() {
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
       socketRef.current.emit('answer', { to: userId, answer });
-      await flushPendingIceCandidates(userId);
-      await applyLowBandwidthConstraints(peerConnection);
+      flushPendingIceCandidates(userId);
     } catch (err) { }
   };
 
@@ -258,15 +247,10 @@ function App() {
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
       socketRef.current.emit('offer', { to: userId, offer });
-      await flushPendingIceCandidates(userId);
-      await applyLowBandwidthConstraints(peerConnection);
+      flushPendingIceCandidates(userId);
     } catch (err) {
     } finally {
-      setTimeout(() => {
-        if (negotiationLockRef.current) {
-          delete negotiationLockRef.current[userId];
-        }
-      }, 5000);
+      delete negotiationLockRef.current[userId];
     }
   };
 
@@ -316,6 +300,7 @@ function App() {
     socket.on('current-users', (users) => {
       setParticipants(users);
       const myId = socket.id;
+      // Triggers connection instantly
       users.forEach((user) => {
         if (myId < user.id) connectToUser(user.id);
       });
@@ -343,8 +328,7 @@ function App() {
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
         socket.emit('answer', { to: from, answer });
-        await flushPendingIceCandidates(from);
-        await applyLowBandwidthConstraints(peerConnection);
+        flushPendingIceCandidates(from);
       } catch (err) { }
     });
 
@@ -354,9 +338,8 @@ function App() {
       try {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
         delete negotiationLockRef.current[from];
-        await flushPendingIceCandidates(from);
-        await flushPendingOffer(from);
-        await applyLowBandwidthConstraints(peerConnection);
+        flushPendingIceCandidates(from);
+        flushPendingOffer(from);
       } catch (err) { }
     });
 
@@ -381,16 +364,18 @@ function App() {
   async function joinRoom(idToJoin = roomId) {
     if (!idToJoin.trim()) return setError('Room ID is required.');
 
-    // Use stream if already loaded from Lobby, otherwise request it
-    let stream = activeLocalStream;
+    setIsJoining(true); // Show instant loading state
+    const stream = await getLocalStream();
+
     if (!stream) {
-      stream = await getLocalStream();
+      setIsJoining(false);
+      return;
     }
-    if (!stream) return;
 
     setJoined(true);
     setError('');
     socketRef.current?.emit('join-room', idToJoin.trim(), name.trim() || 'Guest');
+    setIsJoining(false);
   }
 
   const handleCreateAndJoin = async () => {
@@ -446,33 +431,25 @@ function App() {
   return (
     <div className="app-shell">
       {!joined ? (
-        <div className="join-panel" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '30px', padding: '20px' }}>
-
-          {/* LOBBY PREVIEW */}
-          <div style={{ width: '100%', maxWidth: '500px', aspectRatio: '16/9', backgroundColor: '#111', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 8px 24px rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)' }}>
-            {activeLocalStream ? (
-              <LocalVideo stream={activeLocalStream} name={name || 'You'} />
-            ) : (
-              <div style={{ display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center', color: '#888', padding: '20px', textAlign: 'center' }}>
-                {error || 'Starting camera... Please allow permissions to preview.'}
-              </div>
-            )}
-          </div>
-
-          <div className="glass-card" style={{ width: '100%', maxWidth: '500px' }}>
+        <div className="join-panel">
+          <div className="glass-card">
             <h1>Video Call</h1>
             <p>Join a room instantly. No login required.</p>
             <label>
               Your name
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Guest" />
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Guest" disabled={isJoining} />
             </label>
             <label>
               Room ID (Optional)
-              <input value={roomId} onChange={(e) => setRoomId(e.target.value)} placeholder="Enter code to join existing" />
+              <input value={roomId} onChange={(e) => setRoomId(e.target.value)} placeholder="Enter code to join existing" disabled={isJoining} />
             </label>
             <div className="join-actions">
-              <button onClick={() => joinRoom(roomId)}>Join room</button>
-              <button className="secondary" onClick={handleCreateAndJoin}>Create & Join</button>
+              <button onClick={() => joinRoom(roomId)} disabled={isJoining}>
+                {isJoining ? 'Starting camera...' : 'Join room'}
+              </button>
+              <button className="secondary" onClick={handleCreateAndJoin} disabled={isJoining}>
+                {isJoining ? 'Starting camera...' : 'Create & Join'}
+              </button>
             </div>
             {error && <p className="error" style={{ color: 'red', fontWeight: 'bold' }}>{error}</p>}
           </div>
