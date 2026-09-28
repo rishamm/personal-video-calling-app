@@ -1,542 +1,232 @@
-import { useEffect, useRef, useState } from 'react';
-import { io } from 'socket.io-client';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link2, Mic, MicOff, MonitorUp, PhoneOff, Video, VideoOff } from 'lucide-react';
+import { useCall } from './useCall';
+import './App.css';
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_SERVER || 'http://localhost:3001';
+const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
-function generateRoomId() {
-  return Math.random().toString(36).slice(2, 8).toUpperCase();
+const makeRoomId = () =>
+  Array.from(crypto.getRandomValues(new Uint8Array(6)), (b) => ALPHABET[b % ALPHABET.length]).join('');
+
+const initials = (name) =>
+  (name || 'Guest').trim().split(/\s+/).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('') || 'G';
+
+function useElapsed(active) {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    if (!active) return undefined;
+    setSeconds(0);
+    const id = setInterval(() => setSeconds((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [active]);
+  const h = Math.floor(seconds / 3600);
+  const m = String(Math.floor((seconds % 3600) / 60)).padStart(h ? 2 : 1, '0');
+  const s = String(seconds % 60).padStart(2, '0');
+  return h ? `${h}:${m}:${s}` : `${m}:${s}`;
 }
 
-const RemoteVideo = ({ stream, name }) => {
+function VideoTile({ stream, name, isLocal = false, mirrored = false, videoOff = false, muted = false, connection, className = '' }) {
   const videoRef = useRef(null);
+  const [playing, setPlaying] = useState(false);
+
   useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream;
-      // Force play to bypass browser autoplay blocks that cause black screens
-      videoRef.current.play().catch(e => console.warn("Play prevented:", e));
-    }
+    const el = videoRef.current;
+    if (!el) return;
+    setPlaying(false);
+    el.srcObject = stream ?? null;
+    if (stream) el.play().catch(() => {}); // autoplay can be blocked until a gesture
   }, [stream]);
-  return (
-    <div className="video-card remote" style={{ width: '100%', height: '100%', position: 'relative', backgroundColor: '#111' }}>
-      <video ref={videoRef} autoPlay playsInline style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-      <div className="video-tag" style={{ position: 'absolute', bottom: '10px', left: '10px', background: 'rgba(0,0,0,0.6)', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '14px' }}>
-        {name || 'Guest'}
-      </div>
-    </div>
-  );
-};
 
-const LocalVideo = ({ stream, name }) => {
-  const videoRef = useRef(null);
-  useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream;
-      videoRef.current.play().catch(e => console.warn("Play prevented:", e));
-    }
-  }, [stream]);
-  return (
-    <div className="video-card local" style={{ width: '100%', height: '100%', position: 'relative', backgroundColor: '#111' }}>
-      <video ref={videoRef} autoPlay playsInline muted style={{ transform: 'scaleX(-1)', width: '100%', height: '100%', objectFit: 'cover' }} />
-      <div className="video-tag" style={{ position: 'absolute', bottom: '10px', left: '10px', background: 'rgba(0,0,0,0.6)', color: 'white', padding: '4px 8px', borderRadius: '4px', fontSize: '14px' }}>
-        {name || 'You'}
-      </div>
-    </div>
-  );
-};
-
-function App() {
-  const [name, setName] = useState('Guest');
-  const [roomId, setRoomId] = useState('');
-  const [joined, setJoined] = useState(false);
-  const [isJoining, setIsJoining] = useState(false);
-  const [error, setError] = useState('');
-  const [participants, setParticipants] = useState([]);
-  const [remoteStreams, setRemoteStreams] = useState({});
-  const [isMuted, setIsMuted] = useState(false);
-  const [isCameraOff, setIsCameraOff] = useState(false);
-  const [activeLocalStream, setActiveLocalStream] = useState(null);
-
-  const [mainStreamId, setMainStreamId] = useState('local');
-
-  const socketRef = useRef(null);
-  const localStreamRef = useRef(null);
-  const peerConnectionsRef = useRef({});
-  const negotiationLockRef = useRef({});
-  const pendingRemoteOffersRef = useRef({});
-  const pendingIceCandidatesRef = useRef({});
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const roomFromUrl = params.get('room');
-    if (roomFromUrl) {
-      setRoomId(roomFromUrl);
-    }
-  }, []);
-
-  useEffect(() => {
-    const remoteIds = Object.keys(remoteStreams);
-    if (remoteIds.length > 0 && mainStreamId === 'local') {
-      setMainStreamId(remoteIds[0]);
-    } else if (remoteIds.length === 0 && mainStreamId !== 'local') {
-      setMainStreamId('local');
-    } else if (mainStreamId !== 'local' && !remoteStreams[mainStreamId]) {
-      setMainStreamId(remoteIds.length > 0 ? remoteIds[0] : 'local');
-    }
-  }, [remoteStreams, mainStreamId]);
-
-  useEffect(() => {
-    const handleVisibilityChange = async () => {
-      if (document.visibilityState === 'visible' && joined) {
-        const videoTrack = localStreamRef.current?.getVideoTracks()[0];
-
-        if (!videoTrack || videoTrack.readyState === 'ended') {
-          try {
-            const newStream = await getLocalStream();
-            if (!newStream) return;
-
-            Object.values(peerConnectionsRef.current).forEach(async (pc) => {
-              const videoSender = pc.getSenders().find((s) => s.track?.kind === 'video');
-              if (videoSender && newStream.getVideoTracks()[0]) {
-                await videoSender.replaceTrack(newStream.getVideoTracks()[0]);
-              }
-              const audioSender = pc.getSenders().find((s) => s.track?.kind === 'audio');
-              if (audioSender && newStream.getAudioTracks()[0]) {
-                await audioSender.replaceTrack(newStream.getAudioTracks()[0]);
-              }
-            });
-          } catch (err) { }
-        }
-      }
-    };
-
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [joined, isCameraOff, isMuted]);
-
-  const closePeerConnection = (userId) => {
-    const pc = peerConnectionsRef.current[userId];
-    if (!pc) return;
-    pc.ontrack = null;
-    pc.onicecandidate = null;
-    pc.onconnectionstatechange = null;
-    pc.close();
-    delete peerConnectionsRef.current[userId];
-    delete negotiationLockRef.current[userId];
-    delete pendingRemoteOffersRef.current[userId];
-    delete pendingIceCandidatesRef.current[userId];
-
-    setRemoteStreams((prev) => {
-      const next = { ...prev };
-      delete next[userId];
-      return next;
-    });
-  };
-
-  const createPeerConnection = (userId) => {
-    if (peerConnectionsRef.current[userId]) return peerConnectionsRef.current[userId];
-
-    const configuration = {
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:global.stun.twilio.com:3478' }
-      ]
-    };
-
-    const peerConnection = new RTCPeerConnection(configuration);
-
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => {
-        peerConnection.addTrack(track, localStreamRef.current);
-      });
-    }
-
-    peerConnection.onicecandidate = (event) => {
-      if (event.candidate && socketRef.current) {
-        socketRef.current.emit('ice-candidate', { to: userId, candidate: event.candidate });
-      }
-    };
-
-    peerConnection.ontrack = (event) => {
-      const [remoteStream] = event.streams;
-      if (remoteStream) {
-        setRemoteStreams((prev) => ({ ...prev, [userId]: remoteStream }));
-      }
-    };
-
-    peerConnection.onconnectionstatechange = () => {
-      const state = peerConnection.connectionState;
-      if (state === 'failed' || state === 'disconnected' || state === 'closed') {
-        closePeerConnection(userId);
-        setParticipants(prev => {
-          const stillInRoom = prev.some(p => p.id === userId);
-          if (stillInRoom && socketRef.current?.id < userId) {
-            setTimeout(() => connectToUser(userId), 1500);
-          }
-          return prev;
-        });
-      }
-    };
-
-    peerConnectionsRef.current[userId] = peerConnection;
-    return peerConnection;
-  };
-
-  const flushPendingIceCandidates = async (userId) => {
-    const candidates = pendingIceCandidatesRef.current[userId] || [];
-    if (candidates.length === 0) return;
-    const peerConnection = peerConnectionsRef.current[userId];
-    if (!peerConnection || !peerConnection.remoteDescription) return;
-
-    const pending = [...candidates];
-    delete pendingIceCandidatesRef.current[userId];
-
-    for (const candidate of pending) {
-      try { await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); }
-      catch (err) { }
-    }
-  };
-
-  const flushPendingOffer = async (userId) => {
-    const pendingOffer = pendingRemoteOffersRef.current[userId];
-    if (!pendingOffer) return;
-    delete pendingRemoteOffersRef.current[userId];
-
-    const peerConnection = createPeerConnection(userId);
-    if (peerConnection.signalingState !== 'stable') {
-      pendingRemoteOffersRef.current[userId] = pendingOffer;
-      return;
-    }
-
-    try {
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(pendingOffer));
-      const answer = await peerConnection.createAnswer();
-      await peerConnection.setLocalDescription(answer);
-      socketRef.current.emit('answer', { to: userId, answer });
-      flushPendingIceCandidates(userId);
-    } catch (err) { }
-  };
-
-  const connectToUser = async (userId) => {
-    if (!localStreamRef.current || !userId || !socketRef.current) return;
-
-    const peerConnection = createPeerConnection(userId);
-
-    if (negotiationLockRef.current[userId] || peerConnection.signalingState !== 'stable') return;
-    negotiationLockRef.current[userId] = true;
-
-    try {
-      const offer = await peerConnection.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
-      await peerConnection.setLocalDescription(offer);
-      socketRef.current.emit('offer', { to: userId, offer });
-      flushPendingIceCandidates(userId);
-    } catch (err) {
-    } finally {
-      delete negotiationLockRef.current[userId];
-    }
-  };
-
-  async function getLocalStream() {
-    if (window.location.protocol === 'http:' && window.location.hostname !== 'localhost') {
-      setError('WebRTC blocks the camera on HTTP. You must use HTTPS or localhost.');
-      return null;
-    }
-    try {
-      const constraints = {
-        video: {
-          width: { ideal: 640, max: 854 },
-          height: { ideal: 360, max: 480 },
-          frameRate: { ideal: 15, max: 24 },
-        },
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      localStreamRef.current = stream;
-      setActiveLocalStream(stream);
-      return stream;
-    } catch (err) {
-      setError('Camera/Mic access denied. Please allow permissions.');
-      return null;
-    }
-  }
-
-  useEffect(() => {
-    const socket = io(SOCKET_URL, {
-      transports: ['websocket'],
-      reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
-    });
-    socketRef.current = socket;
-
-    socket.io.on('reconnect', () => {
-      if (joined) {
-        socket.emit('join-room', roomId.trim(), name.trim() || 'Guest');
-      }
-    });
-
-    socket.on('current-users', (users) => {
-      setParticipants(users);
-      const myId = socket.id;
-      // Triggers connection instantly
-      users.forEach((user) => {
-        if (myId < user.id) connectToUser(user.id);
-      });
-    });
-
-    socket.on('user-joined', (user) => {
-      setParticipants((prev) => (prev.some((p) => p.id === user.id) ? prev : [...prev, user]));
-      const myId = socket.id;
-      if (myId < user.id) connectToUser(user.id);
-    });
-
-    socket.on('user-left', (userId) => {
-      setParticipants((prev) => prev.filter((p) => p.id !== userId));
-      closePeerConnection(userId);
-    });
-
-    socket.on('offer', async ({ from, offer }) => {
-      const peerConnection = createPeerConnection(from);
-      if (peerConnection.signalingState !== 'stable') {
-        pendingRemoteOffersRef.current[from] = offer;
-        return;
-      }
-      try {
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
-        const answer = await peerConnection.createAnswer();
-        await peerConnection.setLocalDescription(answer);
-        socket.emit('answer', { to: from, answer });
-        flushPendingIceCandidates(from);
-      } catch (err) { }
-    });
-
-    socket.on('answer', async ({ from, answer }) => {
-      const peerConnection = peerConnectionsRef.current[from];
-      if (!peerConnection || peerConnection.signalingState !== 'have-local-offer') return;
-      try {
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
-        delete negotiationLockRef.current[from];
-        flushPendingIceCandidates(from);
-        flushPendingOffer(from);
-      } catch (err) { }
-    });
-
-    socket.on('ice-candidate', async ({ from, candidate }) => {
-      const peerConnection = peerConnectionsRef.current[from];
-      if (!peerConnection || !peerConnection.remoteDescription) {
-        if (!pendingIceCandidatesRef.current[from]) pendingIceCandidatesRef.current[from] = [];
-        pendingIceCandidatesRef.current[from].push(candidate);
-        return;
-      }
-      try { await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); }
-      catch (err) { }
-    });
-
-    return () => {
-      socket.disconnect();
-      if (localStreamRef.current) localStreamRef.current.getTracks().forEach((track) => track.stop());
-      Object.values(peerConnectionsRef.current).forEach((pc) => pc.close());
-    };
-  }, [joined, roomId, name]);
-
-  async function joinRoom(idToJoin = roomId) {
-    if (!idToJoin.trim()) return setError('Room ID is required.');
-
-    setIsJoining(true);
-
-    const stream = await getLocalStream();
-
-    if (!stream) {
-      setIsJoining(false);
-      return;
-    }
-
-    setJoined(true);
-    setError('');
-    socketRef.current?.emit('join-room', idToJoin.trim(), name.trim() || 'Guest');
-    setIsJoining(false);
-  }
-
-  const handleCreateAndJoin = async () => {
-    const newRoomId = generateRoomId();
-    setRoomId(newRoomId);
-    await joinRoom(newRoomId);
-  };
-
-  const toggleMute = () => {
-    if (localStreamRef.current) {
-      const audioTrack = localStreamRef.current.getAudioTracks()[0];
-      if (audioTrack) {
-        audioTrack.enabled = !audioTrack.enabled;
-        setIsMuted(!audioTrack.enabled);
-      }
-    }
-  };
-
-  const toggleVideo = () => {
-    if (localStreamRef.current) {
-      const videoTrack = localStreamRef.current.getVideoTracks()[0];
-      if (videoTrack) {
-        videoTrack.enabled = !videoTrack.enabled;
-        setIsCameraOff(!videoTrack.enabled);
-      }
-    }
-  };
-
-  const copyRoomLink = async () => {
-    const shareUrl = `${window.location.origin}?room=${encodeURIComponent(roomId)}`;
-    try {
-      await navigator.clipboard.writeText(shareUrl);
-      alert('Link copied to clipboard! Share it with others to join.');
-    } catch (err) {
-      alert(`Copy failed. Please manually share this Room ID: ${roomId}`);
-    }
-  };
-
-  // MAP ALL STREAMS FOR SWITCHING LOGIC
-  const allStreams = [
-    { id: 'local', stream: activeLocalStream, isLocal: true, name: name || 'You' },
-    ...Object.entries(remoteStreams).map(([id, stream]) => ({
-      id,
-      stream,
-      isLocal: false,
-      name: participants.find((p) => p.id === id)?.name || 'Guest'
-    }))
-  ];
-
-  const mainStreamData = allStreams.find(s => s.id === mainStreamId) || allStreams[0];
-  const pipStreamsData = allStreams.filter(s => s.id !== mainStreamData?.id);
+  const showVideo = playing && !videoOff;
+  const isConnecting = connection && connection !== 'connected';
 
   return (
-    <div className="app-shell">
-      {!joined ? (
-        <div className="join-panel">
-          <div className="glass-card">
-            <h1>Video Call</h1>
-            <p>Join a room instantly. No login required.</p>
-            <label>
-              Your name
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Guest" disabled={isJoining} />
-            </label>
-            <label>
-              Room ID (Optional)
-              <input value={roomId} onChange={(e) => setRoomId(e.target.value)} placeholder="Enter code to join existing" disabled={isJoining} />
-            </label>
-            <div className="join-actions">
-              <button onClick={() => joinRoom(roomId)} disabled={isJoining}>
-                {isJoining ? 'Connecting...' : 'Join room'}
-              </button>
-              <button className="secondary" onClick={handleCreateAndJoin} disabled={isJoining}>
-                {isJoining ? 'Connecting...' : 'Create & Join'}
-              </button>
-            </div>
-            {error && <p className="error" style={{ color: 'red', fontWeight: 'bold' }}>{error}</p>}
-          </div>
-        </div>
-      ) : (
-        <div className="call-layout">
-          <header className="top-bar">
-            <div><span className="label">Room</span><h2>{roomId}</h2></div>
-            <div className="header-actions">
-              <button className="secondary" onClick={copyRoomLink} style={{ marginRight: '10px' }}>
-                Copy Link
-              </button>
-              <button className={isMuted ? "danger" : "secondary"} onClick={toggleMute} style={{ marginRight: '10px' }}>
-                {isMuted ? 'Unmute' : 'Mute'}
-              </button>
-              <button className={isCameraOff ? "danger" : "secondary"} onClick={toggleVideo} style={{ marginRight: '20px' }}>
-                {isCameraOff ? 'Camera On' : 'Camera Off'}
-              </button>
-              <button className="danger" onClick={() => window.location.reload()}>Leave</button>
-            </div>
-          </header>
-
-          {/* Main + PiP Display */}
-          <div style={{ position: 'relative', flex: 1, width: '100%', height: '100%', minHeight: '600px', display: 'flex', justifyContent: 'center', alignItems: 'center', backgroundColor: '#000' }}>
-
-            {/* Main Full-Screen Video */}
-            <div style={{ width: '100%', height: '100%', position: 'absolute', inset: 0 }}>
-              {mainStreamData?.isLocal ? (
-                <LocalVideo stream={mainStreamData.stream} name={mainStreamData.name} />
-              ) : (
-                <RemoteVideo stream={mainStreamData?.stream} name={mainStreamData?.name} />
-              )}
-            </div>
-
-            {/* Google Meet Style "Waiting for others" popup */}
-            {participants.length === 0 && (
-              <div style={{
-                position: 'absolute',
-                bottom: '30px',
-                left: '30px',
-                backgroundColor: 'rgba(30, 30, 30, 0.9)',
-                padding: '20px',
-                borderRadius: '12px',
-                zIndex: 20,
-                color: 'white',
-                maxWidth: '320px',
-                boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-                border: '1px solid rgba(255,255,255,0.1)'
-              }}>
-                <h3 style={{ marginTop: 0, marginBottom: '8px', fontSize: '18px', fontWeight: '500' }}>Your meeting's ready</h3>
-                <p style={{ margin: 0, marginBottom: '16px', fontSize: '14px', color: '#ccc', lineHeight: '1.4' }}>
-                  Share this meeting link with others you want in the meeting.
-                </p>
-                <button
-                  onClick={copyRoomLink}
-                  style={{
-                    width: '100%',
-                    padding: '10px 16px',
-                    backgroundColor: '#1a73e8',
-                    border: 'none',
-                    borderRadius: '4px',
-                    color: 'white',
-                    cursor: 'pointer',
-                    fontWeight: 'bold',
-                    fontSize: '14px'
-                  }}
-                >
-                  Copy joining info
-                </button>
-              </div>
-            )}
-
-            {/* Floating PiP Videos (Click to Swap) */}
-            <div style={{ position: 'absolute', bottom: '20px', right: '20px', display: 'flex', flexDirection: 'column', gap: '15px', zIndex: 10 }}>
-              {pipStreamsData.map((s) => (
-                <div
-                  key={s.id}
-                  onClick={() => setMainStreamId(s.id)}
-                  style={{
-                    width: '140px',
-                    aspectRatio: '16/9',
-                    cursor: 'pointer',
-                    borderRadius: '8px',
-                    overflow: 'hidden',
-                    boxShadow: '0 8px 16px rgba(0,0,0,0.6)',
-                    border: '2px solid rgba(255,255,255,0.7)',
-                    transition: 'transform 0.2s ease-in-out'
-                  }}
-                  onMouseOver={(e) => e.currentTarget.style.transform = 'scale(1.05)'}
-                  onMouseOut={(e) => e.currentTarget.style.transform = 'scale(1)'}
-                >
-                  {s.isLocal ? (
-                    <LocalVideo stream={s.stream} name={s.name} />
-                  ) : (
-                    <RemoteVideo stream={s.stream} name={s.name} />
-                  )}
-                </div>
-              ))}
-            </div>
-
-          </div>
+    <figure className={`tile ${className}`}>
+      <div className="tile-avatar" aria-hidden="true"><span>{initials(name)}</span></div>
+      <video
+        ref={videoRef}
+        className={`tile-video${showVideo ? ' is-live' : ''}${mirrored ? ' is-mirrored' : ''}`}
+        autoPlay
+        playsInline
+        muted={isLocal}
+        onPlaying={() => setPlaying(true)}
+      />
+      {isConnecting && (
+        <div className="tile-status" role="status">
+          {connection === 'failed' || connection === 'disconnected' ? 'Reconnecting…' : 'Connecting…'}
         </div>
       )}
+      <figcaption className="tile-name">
+        {isLocal ? `${name} (You)` : name}
+        {muted && <MicOff size={14} aria-label="Muted" />}
+      </figcaption>
+    </figure>
+  );
+}
+
+function ControlButton({ label, active = false, danger = false, disabled = false, onClick, children }) {
+  return (
+    <button
+      type="button"
+      className={`ctl${active ? ' is-active' : ''}${danger ? ' is-danger' : ''}`}
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      aria-pressed={active || undefined}
+      title={label}
+    >
+      {children}
+    </button>
+  );
+}
+
+function JoinScreen({ initialRoom, error, busy, onJoin }) {
+  const [name, setName] = useState('');
+  const [roomId, setRoomId] = useState(initialRoom);
+  const hasRoom = roomId.trim().length > 0;
+
+  const submit = (e) => {
+    e.preventDefault();
+    onJoin(roomId.trim().toUpperCase() || makeRoomId(), name.trim() || 'Guest');
+  };
+
+  return (
+    <main className="join">
+      <form className="join-card" onSubmit={submit}>
+        <h1>Start or join a call</h1>
+        <p className="muted">Video calls in your browser. No account needed.</p>
+
+        <label className="field">
+          <span>Your name</span>
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Guest" autoComplete="name" disabled={busy} />
+        </label>
+        <label className="field">
+          <span>Room code</span>
+          <input
+            value={roomId}
+            onChange={(e) => setRoomId(e.target.value)}
+            placeholder="Leave empty to create a new room"
+            autoCapitalize="characters"
+            spellCheck="false"
+            disabled={busy}
+          />
+        </label>
+
+        {error && <p className="form-error" role="alert">{error}</p>}
+
+        <button type="submit" className="btn-primary" disabled={busy}>
+          {busy ? 'Starting camera…' : hasRoom ? 'Join call' : 'Create new call'}
+        </button>
+      </form>
+    </main>
+  );
+}
+
+function CallScreen({ call, onCopyLink }) {
+  const { room, peers, localStream, isMuted, isCameraOff, isSharing, signalOnline } = call;
+  const elapsed = useElapsed(true);
+  const alone = peers.length === 0;
+  const name = room.name;
+
+  const localTile = (
+    <VideoTile
+      stream={localStream}
+      name={name}
+      isLocal
+      mirrored={!isSharing}
+      videoOff={isCameraOff && !isSharing}
+      muted={isMuted}
+      className={alone ? 'tile-solo' : 'tile-self'}
+    />
+  );
+
+  return (
+    <div className="call">
+      <header className="call-bar">
+        <div className="call-title">
+          <strong>{room.id}</strong>
+          <span className="muted">{elapsed}</span>
+        </div>
+        <span className="muted">{alone ? 'Only you' : `${peers.length + 1} in call`}</span>
+      </header>
+
+      {!signalOnline && <div className="banner" role="status">Connection to the server was lost. Reconnecting…</div>}
+
+      <section className="stage" data-count={Math.min(peers.length, 9)}>
+        {alone ? localTile : peers.map((p) => (
+          <VideoTile key={p.id} stream={p.stream} name={p.name} connection={p.connectionState} />
+        ))}
+        {!alone && localTile}
+
+        {alone && (
+          <aside className="invite">
+            <h2>Waiting for others</h2>
+            <p className="muted">Share the link so people can join room {room.id}.</p>
+            <button type="button" className="btn-primary" onClick={onCopyLink}>Copy invite link</button>
+          </aside>
+        )}
+      </section>
+
+      <footer className="controls">
+        <ControlButton label={isMuted ? 'Unmute' : 'Mute'} active={isMuted} onClick={call.toggleMute}>
+          {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
+        </ControlButton>
+        <ControlButton label={isCameraOff ? 'Turn camera on' : 'Turn camera off'} active={isCameraOff} onClick={call.toggleCamera}>
+          {isCameraOff ? <VideoOff size={20} /> : <Video size={20} />}
+        </ControlButton>
+        <ControlButton label={isSharing ? 'Stop sharing' : 'Share screen'} active={isSharing} disabled={!call.canShareScreen} onClick={call.toggleScreenShare}>
+          <MonitorUp size={20} />
+        </ControlButton>
+        <ControlButton label="Copy invite link" onClick={onCopyLink}>
+          <Link2 size={20} />
+        </ControlButton>
+        <ControlButton label="Leave call" danger onClick={call.leave}>
+          <PhoneOff size={20} />
+        </ControlButton>
+      </footer>
     </div>
   );
 }
 
-export default App;
+export default function App() {
+  const call = useCall();
+  const [toast, setToast] = useState('');
+  const toastTimer = useRef(null);
+  const initialRoom = useRef(new URLSearchParams(window.location.search).get('room') || '');
+
+  const showToast = useCallback((message) => {
+    setToast(message);
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(''), 2500);
+  }, []);
+
+  const copyLink = useCallback(async () => {
+    const url = `${window.location.origin}${window.location.pathname}?room=${encodeURIComponent(call.room?.id ?? '')}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      showToast('Invite link copied');
+    } catch {
+      showToast(`Copy failed. Share room code ${call.room?.id}`);
+    }
+  }, [call.room, showToast]);
+
+  // Keep the address bar shareable while in a call.
+  useEffect(() => {
+    if (call.status === 'in-call' && call.room) {
+      window.history.replaceState(null, '', `?room=${encodeURIComponent(call.room.id)}`);
+    } else if (call.status === 'idle') {
+      window.history.replaceState(null, '', window.location.pathname);
+    }
+  }, [call.status, call.room]);
+
+  return (
+    <>
+      {call.status === 'in-call' && call.room ? (
+        <CallScreen call={call} onCopyLink={copyLink} />
+      ) : (
+        <JoinScreen initialRoom={initialRoom.current} error={call.error} busy={call.status === 'joining'} onJoin={call.join} />
+      )}
+      <div className={`toast${toast ? ' is-visible' : ''}`} role="status" aria-live="polite">{toast}</div>
+    </>
+  );
+}
